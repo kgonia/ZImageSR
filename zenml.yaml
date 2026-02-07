@@ -1,0 +1,37 @@
+project:
+  name: zimagesr
+
+components:
+  orchestrator:
+    name: zimagesr-local-orchestrator
+    flavor: local
+
+  artifact_stores:
+    local:
+      enabled: true
+      name: zimagesr-local-store
+      path: ./.zenml/artifacts
+    s3:
+      enabled: false
+      name: zimagesr-s3-store
+      path: s3://YOUR_BUCKET/zimagesr/zenml-artifacts
+
+  experiment_tracker:
+    wandb:
+      enabled: false
+      name: zimagesr-wandb
+      project_name: zimagesr
+      entity: null
+      api_key_env: WANDB_API_KEY
+
+stacks:
+  local:
+    enabled: true
+    name: zimagesr-local-stack
+    experiment_tracker: null
+    set_active: true
+  s3:
+    enabled: false
+    name: zimagesr-s3-stack
+    experiment_tracker: null
+    set_active: false

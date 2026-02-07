@@ -1,0 +1,2 @@
+Input: all_image=[(16,1,64,64)], t=(torch.Size([1])), all_cap_feats=[(1, 2560)]
+Output: list of 1, shapes: [(16, 1, 64, 64)]

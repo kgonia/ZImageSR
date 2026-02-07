@@ -1,0 +1,7 @@
+(x: List[torch.Tensor], t, cap_feats: List[torch.Tensor], patch_size=2, f_patch_size=1, return_dict: bool = True)
+  x: default=<class 'inspect._empty'>, kind=POSITIONAL_OR_KEYWORD
+  t: default=<class 'inspect._empty'>, kind=POSITIONAL_OR_KEYWORD
+  cap_feats: default=<class 'inspect._empty'>, kind=POSITIONAL_OR_KEYWORD
+  patch_size: default=2, kind=POSITIONAL_OR_KEYWORD
+  f_patch_size: default=1, kind=POSITIONAL_OR_KEYWORD
+  return_dict: default=True, kind=POSITIONAL_OR_KEYWORD
