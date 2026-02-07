@@ -28,3 +28,15 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/zimagesr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "slow: integration tests requiring model weights and long runtime",
+  "gpu: tests that require CUDA",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
