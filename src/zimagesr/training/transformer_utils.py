@@ -202,7 +202,7 @@ def vae_decode_to_pixels(
     Returns:
         ``(B, 3, H', W')`` float tensor in ``[0, 1]``.
     """
-    z_raw = latents / scaling_factor
+    z_raw = (latents / scaling_factor).to(dtype=vae.dtype)
     if autocast_dtype is not None and latents.device.type == "cuda":
         with torch.amp.autocast("cuda", dtype=autocast_dtype):
             x = vae.decode(z_raw).sample

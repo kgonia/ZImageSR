@@ -282,7 +282,8 @@ def vae_encode_latents_safe(
 def decode_latents_to_pil(pipe, latents: torch.Tensor) -> Image.Image:
     """Decode VAE latents to a PIL image. Caller must ensure VAE is on the correct device."""
     scaling = getattr(pipe.vae.config, "scaling_factor", 1.0)
-    decoded = pipe.vae.decode(latents / scaling).sample
+    z = (latents / scaling).to(device=pipe.vae.device, dtype=pipe.vae.dtype)
+    decoded = pipe.vae.decode(z).sample
     decoded = (decoded / 2 + 0.5).clamp(0, 1)
     decoded = decoded[0].cpu().permute(1, 2, 0).float().numpy()
     return Image.fromarray((decoded * 255).round().astype(np.uint8))
