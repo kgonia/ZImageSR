@@ -66,6 +66,14 @@ def mock_pipeline_factory(torch_mod):
             self.last_decode_input = None
             self.last_encode_input = None
 
+        @property
+        def device(self):
+            return self._w.device
+
+        @property
+        def dtype(self):
+            return self._w.dtype
+
         def to(self, *args, **kwargs):  # pragma: no cover - behavior checked via flags
             self.to_called = True
             return super().to(*args, **kwargs)

@@ -302,6 +302,14 @@ class TestPrepareCapFeats:
 class TestVaeDecodeToPixels:
     def _make_fake_vae(self):
         class FakeVAE(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self._w = torch.nn.Parameter(torch.zeros(1))
+
+            @property
+            def dtype(self):
+                return self._w.dtype
+
             def decode(self, z):
                 # Return values in [-1, 1] range
                 B, C, H, W = z.shape
@@ -323,6 +331,14 @@ class TestVaeDecodeToPixels:
         calls = []
 
         class TrackVAE(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self._w = torch.nn.Parameter(torch.zeros(1))
+
+            @property
+            def dtype(self):
+                return self._w.dtype
+
             def decode(self, z):
                 calls.append(z.clone())
                 return SimpleNamespace(sample=torch.zeros(1, 3, 8, 8))

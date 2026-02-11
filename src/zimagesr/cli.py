@@ -55,6 +55,12 @@ def _train_defaults() -> dict[str, object]:
             "disable_vae_force_upcast": _TrainConfig.disable_vae_force_upcast,
             "num_workers": _TrainConfig.num_workers,
             "seed": _TrainConfig.seed,
+            "wandb_enabled": _TrainConfig.wandb_enabled,
+            "wandb_project": _TrainConfig.wandb_project,
+            "wandb_entity": _TrainConfig.wandb_entity,
+            "wandb_run_name": _TrainConfig.wandb_run_name,
+            "wandb_mode": _TrainConfig.wandb_mode,
+            "wandb_log_checkpoints": _TrainConfig.wandb_log_checkpoints,
         }
     return {
         "model_id": "Tongyi-MAI/Z-Image-Turbo",
@@ -79,6 +85,12 @@ def _train_defaults() -> dict[str, object]:
         "disable_vae_force_upcast": True,
         "num_workers": 2,
         "seed": None,
+        "wandb_enabled": False,
+        "wandb_project": "zimagesr",
+        "wandb_entity": None,
+        "wandb_run_name": None,
+        "wandb_mode": "online",
+        "wandb_log_checkpoints": True,
     }
 
 
@@ -184,6 +196,26 @@ def _add_train_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--num-workers", type=int, default=defaults["num_workers"])
     parser.add_argument("--seed", type=int, default=defaults["seed"])
+    parser.add_argument(
+        "--wandb",
+        action=argparse.BooleanOptionalAction,
+        default=defaults["wandb_enabled"],
+        help="Enable native Weights & Biases logging during Phase 2 training.",
+    )
+    parser.add_argument("--wandb-project", default=defaults["wandb_project"])
+    parser.add_argument("--wandb-entity", default=defaults["wandb_entity"])
+    parser.add_argument("--wandb-run-name", default=defaults["wandb_run_name"])
+    parser.add_argument(
+        "--wandb-mode",
+        choices=["online", "offline"],
+        default=defaults["wandb_mode"],
+    )
+    parser.add_argument(
+        "--wandb-log-checkpoints",
+        action=argparse.BooleanOptionalAction,
+        default=defaults["wandb_log_checkpoints"],
+        help="Log LoRA checkpoints as WandB model artifacts.",
+    )
 
 
 def _train_config_from_args(args: argparse.Namespace):
@@ -215,6 +247,12 @@ def _train_config_from_args(args: argparse.Namespace):
         disable_vae_force_upcast=args.disable_vae_force_upcast,
         num_workers=args.num_workers,
         seed=args.seed,
+        wandb_enabled=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_run_name=args.wandb_run_name,
+        wandb_mode=args.wandb_mode,
+        wandb_log_checkpoints=args.wandb_log_checkpoints,
     )
 
 
@@ -384,7 +422,7 @@ def main() -> None:
         except ImportError as exc:
             raise RuntimeError(
                 "Training command requires `zimagesr.training` modules plus "
-                "optional deps (`peft`, `lpips`). "
+                "optional deps (`peft`, `lpips`, and optionally `wandb`). "
                 "Ensure repo has `src/zimagesr/training/`, then run: "
                 "uv sync && uv pip install -e '.[training]'"
             ) from exc

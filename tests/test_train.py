@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from zimagesr.training.config import TrainConfig
 from zimagesr.training.losses import compute_adl_loss
-from zimagesr.training.train import _resolve_dtype
+from zimagesr.training.train import _resolve_dtype, _wandb_config_dict
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +86,8 @@ class TestTrainConfig:
         assert cfg.max_steps == 750
         assert cfg.rec_loss_every == 8
         assert cfg.lambda_adl == 0.0
+        assert cfg.wandb_enabled is False
+        assert cfg.wandb_project == "zimagesr"
 
     def test_custom_values(self, tmp_path):
         cfg = TrainConfig(
@@ -171,3 +173,11 @@ class TestAdlFallback:
             default_dtype=torch.float32,
         )
         assert actual.item() == pytest.approx(expected.item(), abs=1e-6)
+
+
+class TestWandbConfigDict:
+    def test_paths_are_serialized(self, tmp_path):
+        cfg = TrainConfig(pairs_dir=tmp_path / "pairs", save_dir=tmp_path / "save")
+        data = _wandb_config_dict(cfg)
+        assert isinstance(data["pairs_dir"], str)
+        assert isinstance(data["save_dir"], str)

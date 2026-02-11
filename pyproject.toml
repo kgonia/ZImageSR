@@ -23,7 +23,7 @@ zimagesr-data = "zimagesr.cli:main"
 zimagesr-zenml-bootstrap = "zimagesr.pipelines.zenml_bootstrap:main"
 
 [project.optional-dependencies]
-training = ["peft", "lpips"]
+training = ["peft", "lpips", "wandb"]
 
 [build-system]
 requires = ["hatchling"]

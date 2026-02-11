@@ -182,6 +182,8 @@ def test_u13_decode_latents_to_pil_divides_by_scaling():
         def __init__(self):
             self.config = SimpleNamespace(scaling_factor=4.0)
             self.last_decode_input = None
+            self.device = torch.device("cpu")
+            self.dtype = torch.float32
 
         def decode(self, z):
             self.last_decode_input = z

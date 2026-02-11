@@ -23,6 +23,10 @@ class TestAddTrainArgs:
         assert args.max_steps == TrainConfig.max_steps
         assert args.lora_rank == TrainConfig.lora_rank
         assert args.lambda_adl == TrainConfig.lambda_adl
+        assert args.wandb == TrainConfig.wandb_enabled
+        assert args.wandb_project == TrainConfig.wandb_project
+        assert args.wandb_mode == TrainConfig.wandb_mode
+        assert args.wandb_log_checkpoints == TrainConfig.wandb_log_checkpoints
         assert args.seed is None
 
     def test_parses_all_overrides(self, tmp_path):
@@ -55,6 +59,12 @@ class TestAddTrainArgs:
                 "--no-disable-vae-force-upcast",
                 "--num-workers", "0",
                 "--seed", "42",
+                "--wandb",
+                "--wandb-project", "proj-x",
+                "--wandb-entity", "team-y",
+                "--wandb-run-name", "run-z",
+                "--wandb-mode", "offline",
+                "--no-wandb-log-checkpoints",
             ]
         )
 
@@ -77,6 +87,12 @@ class TestAddTrainArgs:
         assert args.disable_vae_force_upcast is False
         assert args.num_workers == 0
         assert args.seed == 42
+        assert args.wandb is True
+        assert args.wandb_project == "proj-x"
+        assert args.wandb_entity == "team-y"
+        assert args.wandb_run_name == "run-z"
+        assert args.wandb_mode == "offline"
+        assert args.wandb_log_checkpoints is False
 
     def test_pairs_dir_required(self):
         parser = argparse.ArgumentParser()
@@ -102,6 +118,7 @@ class TestTrainConfigFromArgs:
         assert cfg.tl == 0.3
         assert cfg.seed == 7
         assert cfg.batch_size == TrainConfig.batch_size  # default
+        assert cfg.wandb_enabled is TrainConfig.wandb_enabled
 
 
 class TestBuildParserHasTrainAndGenerateZl:

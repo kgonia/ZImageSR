@@ -44,3 +44,11 @@ class TrainConfig:
     disable_vae_force_upcast: bool = True
     num_workers: int = 2
     seed: int | None = None
+
+    # WandB
+    wandb_enabled: bool = False
+    wandb_project: str = "zimagesr"
+    wandb_entity: str | None = None
+    wandb_run_name: str | None = None
+    wandb_mode: str = "online"  # online/offline
+    wandb_log_checkpoints: bool = True

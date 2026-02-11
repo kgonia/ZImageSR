@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import logging
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,15 @@ def _resolve_dtype(dtype_str: str | None, device: str) -> torch.dtype:
     if device.startswith("cpu"):
         return torch.float32
     return torch.bfloat16
+
+
+def _wandb_config_dict(config: TrainConfig) -> dict[str, Any]:
+    """Convert TrainConfig to a WandB-safe config dict."""
+    cfg = asdict(config)
+    for key, value in list(cfg.items()):
+        if isinstance(value, Path):
+            cfg[key] = str(value)
+    return cfg
 
 
 def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
@@ -111,6 +121,29 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
     )
     logger.info("Dataset: %d samples", len(ds))
 
+    wandb = None
+    wandb_run = None
+    if config.wandb_enabled and accelerator.is_main_process:
+        try:
+            import wandb as _wandb
+        except ImportError as exc:
+            raise RuntimeError(
+                "WandB logging is enabled but `wandb` is not installed. "
+                "Install with: uv pip install -e '.[training]'"
+            ) from exc
+        wandb = _wandb
+        wandb_run = wandb.init(
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            name=config.wandb_run_name,
+            mode=config.wandb_mode,
+            config=_wandb_config_dict(config),
+        )
+        wandb_run.summary["dataset_size"] = len(ds)
+        wandb_run.summary["t_scale"] = t_scale
+        wandb_run.summary["vae_scaling_factor"] = vae_sf
+        wandb_run.summary["cap_feats_shape"] = tuple(int(v) for v in cap_feats_2d.shape)
+
     # ── Optimizer ───────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
         [p for p in pipe.transformer.parameters() if p.requires_grad],
@@ -157,69 +190,88 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
 
     pbar = tqdm(total=config.max_steps, desc="FluxSR-FTD", disable=not accelerator.is_local_main_process)
 
-    while global_step < config.max_steps:
-        for batch in dl:
-            if global_step >= config.max_steps:
-                break
+    try:
+        while global_step < config.max_steps:
+            for batch in dl:
+                if global_step >= config.max_steps:
+                    break
 
-            eps = batch["eps"].to(device=device, dtype=dtype)
-            z0 = batch["z0"].to(device=device, dtype=dtype)
-            zL = batch["zL"].to(device=device, dtype=dtype)
-            B = eps.shape[0]
+                eps = batch["eps"].to(device=device, dtype=dtype)
+                z0 = batch["z0"].to(device=device, dtype=dtype)
+                zL = batch["zL"].to(device=device, dtype=dtype)
+                B = eps.shape[0]
 
-            u_t = eps - z0  # rectified flow teacher velocity
+                u_t = eps - z0  # rectified flow teacher velocity
 
-            with accelerator.accumulate(pipe.transformer):
-                # ── FTD loss (Eq. 16/17) ────────────────────────────────
-                t = torch.rand(B, device=device, dtype=dtype) * (1.0 - TL) + TL
-                t_bc = t.view(B, 1, 1, 1)
+                with accelerator.accumulate(pipe.transformer):
+                    # ── FTD loss (Eq. 16/17) ────────────────────────────────
+                    t = torch.rand(B, device=device, dtype=dtype) * (1.0 - TL) + TL
+                    t_bc = t.view(B, 1, 1, 1)
 
-                # Eq. 16: student trajectory interpolation
-                x_t = ((1.0 - t_bc) / (1.0 - TL)) * zL + ((t_bc - TL) / (1.0 - TL)) * eps
+                    # Eq. 16: student trajectory interpolation
+                    x_t = ((1.0 - t_bc) / (1.0 - TL)) * zL + ((t_bc - TL) / (1.0 - TL)) * eps
 
-                if use_adl:
-                    with ADLHookContext(pipe.transformer) as adl_ctx:
+                    if use_adl:
+                        with ADLHookContext(pipe.transformer) as adl_ctx:
+                            v_theta = call_transformer(
+                                pipe.transformer,
+                                latents=x_t,
+                                timestep=t * t_scale,
+                                cap_feats_2d=cap_feats_2d,
+                            )
+                        L_ADL = compute_adl_loss(
+                            adl_ctx.features,
+                            default_device=device,
+                            default_dtype=dtype,
+                        )
+                        L_ADL = L_ADL.to(device=device, dtype=dtype)
+                    else:
                         v_theta = call_transformer(
                             pipe.transformer,
                             latents=x_t,
                             timestep=t * t_scale,
                             cap_feats_2d=cap_feats_2d,
                         )
-                    L_ADL = compute_adl_loss(
-                        adl_ctx.features,
-                        default_device=device,
-                        default_dtype=dtype,
+                        L_ADL = torch.zeros((), device=device, dtype=dtype)
+
+                    # Eq. 17
+                    ftd_pred = u_t - v_theta * TL_bc
+                    ftd_target = eps - zL
+                    L_FTD = F.mse_loss(ftd_pred, ftd_target)
+
+                    # ── Recon loss (Eq. 18/21) ──────────────────────────────
+                    L_Rec = torch.tensor(0.0, device=device)
+                    do_rec = (
+                        config.rec_loss_every > 0
+                        and global_step % config.rec_loss_every == 0
+                        and "x0_pixels" in batch
                     )
-                    L_ADL = L_ADL.to(device=device, dtype=dtype)
-                else:
-                    v_theta = call_transformer(
-                        pipe.transformer,
-                        latents=x_t,
-                        timestep=t * t_scale,
-                        cap_feats_2d=cap_feats_2d,
-                    )
-                    L_ADL = torch.zeros((), device=device, dtype=dtype)
 
-                # Eq. 17
-                ftd_pred = u_t - v_theta * TL_bc
-                ftd_target = eps - zL
-                L_FTD = F.mse_loss(ftd_pred, ftd_target)
+                    if do_rec:
+                        assert tv_lpips is not None
+                        x_HR = batch["x0_pixels"].to(device=device, dtype=dtype)
+                        TL_t = torch.full((B,), TL * t_scale, device=device, dtype=dtype)
 
-                # ── Recon loss (Eq. 18/21) ──────────────────────────────
-                L_Rec = torch.tensor(0.0, device=device)
-                do_rec = (
-                    config.rec_loss_every > 0
-                    and global_step % config.rec_loss_every == 0
-                    and "x0_pixels" in batch
-                )
+                        if config.detach_recon:
+                            with torch.no_grad():
+                                v_TL = call_transformer(
+                                    pipe.transformer,
+                                    latents=zL,
+                                    timestep=TL_t,
+                                    cap_feats_2d=cap_feats_2d,
+                                )
+                                z0_hat = zL - v_TL * TL_bc
+                                autocast_dt = torch.bfloat16 if device.type != "cpu" else None
+                                x0_hat = vae_decode_to_pixels(pipe.vae, z0_hat, vae_sf, autocast_dtype=autocast_dt)
 
-                if do_rec:
-                    assert tv_lpips is not None
-                    x_HR = batch["x0_pixels"].to(device=device, dtype=dtype)
-                    TL_t = torch.full((B,), TL * t_scale, device=device, dtype=dtype)
+                                L_MSE = F.mse_loss(x0_hat, x_HR)
 
-                    if config.detach_recon:
-                        with torch.no_grad():
+                                tv_lpips.to(device)
+                                L_TVLP = tv_lpips(x0_hat.float(), x_HR.float())
+                                tv_lpips.to("cpu")
+
+                            L_Rec = (L_MSE + config.lambda_tvlpips * L_TVLP).to(device=device, dtype=dtype)
+                        else:
                             v_TL = call_transformer(
                                 pipe.transformer,
                                 latents=zL,
@@ -236,67 +288,84 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                             L_TVLP = tv_lpips(x0_hat.float(), x_HR.float())
                             tv_lpips.to("cpu")
 
-                        L_Rec = (L_MSE + config.lambda_tvlpips * L_TVLP).to(device=device, dtype=dtype)
-                    else:
-                        v_TL = call_transformer(
-                            pipe.transformer,
-                            latents=zL,
-                            timestep=TL_t,
-                            cap_feats_2d=cap_feats_2d,
+                            L_Rec = L_MSE + config.lambda_tvlpips * L_TVLP
+
+                    loss = L_FTD + L_Rec + config.lambda_adl * L_ADL
+
+                    accelerator.backward(loss)
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+
+                # ── Logging ─────────────────────────────────────────────────
+                global_step += 1
+                loss_log["ftd"] += L_FTD.item()
+                loss_log["rec"] += L_Rec.item()
+                loss_log["adl"] += L_ADL.item()
+                loss_log["total"] += loss.item()
+
+                pbar.update(1)
+                if global_step % config.log_every == 0:
+                    n = config.log_every
+                    avg_ftd = loss_log["ftd"] / n
+                    avg_rec = loss_log["rec"] / n
+                    avg_adl = loss_log["adl"] / n
+                    avg_total = loss_log["total"] / n
+                    postfix = {
+                        "ftd": f"{avg_ftd:.4f}",
+                        "rec": f"{avg_rec:.4f}",
+                        "tot": f"{avg_total:.4f}",
+                    }
+                    if use_adl:
+                        postfix["adl"] = f"{avg_adl:.4f}"
+                    pbar.set_postfix(postfix)
+                    if wandb_run is not None:
+                        wandb_run.log(
+                            {
+                                "train/loss_ftd": avg_ftd,
+                                "train/loss_rec": avg_rec,
+                                "train/loss_adl": avg_adl,
+                                "train/loss_total": avg_total,
+                                "train/lr": optimizer.param_groups[0]["lr"],
+                            },
+                            step=global_step,
                         )
-                        z0_hat = zL - v_TL * TL_bc
-                        autocast_dt = torch.bfloat16 if device.type != "cpu" else None
-                        x0_hat = vae_decode_to_pixels(pipe.vae, z0_hat, vae_sf, autocast_dtype=autocast_dt)
+                    loss_log = {k: 0.0 for k in loss_log}
 
-                        L_MSE = F.mse_loss(x0_hat, x_HR)
+                if config.save_every > 0 and global_step % config.save_every == 0:
+                    sp = save_dir / f"lora_step_{global_step}"
+                    save_lora(pipe.transformer, sp, accelerator=accelerator)
+                    ok = (sp / "adapter_config.json").exists()
+                    logger.info("Step %d saved: %s (%s)", global_step, sp, "OK" if ok else "MISSING adapter_config!")
+                    if wandb_run is not None and wandb is not None and config.wandb_log_checkpoints and ok:
+                        artifact = wandb.Artifact(
+                            name=f"zimagesr-lora-{wandb_run.id}-step-{global_step}",
+                            type="model",
+                            metadata={"step": global_step},
+                        )
+                        artifact.add_dir(str(sp))
+                        wandb_run.log_artifact(artifact)
 
-                        tv_lpips.to(device)
-                        L_TVLP = tv_lpips(x0_hat, x_HR)
-                        tv_lpips.to("cpu")
-                        torch.cuda.empty_cache()
+        # ── Final save ──────────────────────────────────────────────────────
+        final = save_dir / "lora_final"
+        save_lora(pipe.transformer, final, accelerator=accelerator)
+        logger.info("Final LoRA saved: %s", final)
 
-                        L_Rec = L_MSE + config.lambda_tvlpips * L_TVLP
+        if wandb_run is not None and wandb is not None and config.wandb_log_checkpoints:
+            artifact = wandb.Artifact(
+                name=f"zimagesr-lora-{wandb_run.id}-final",
+                type="model",
+                metadata={"step": global_step},
+            )
+            artifact.add_dir(str(final))
+            wandb_run.log_artifact(artifact)
+            wandb_run.summary["final_path"] = str(final)
 
-                loss = L_FTD + L_Rec + config.lambda_adl * L_ADL
-
-                accelerator.backward(loss)
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-
-            # ── Logging ─────────────────────────────────────────────────
-            global_step += 1
-            loss_log["ftd"] += L_FTD.item()
-            loss_log["rec"] += L_Rec.item()
-            loss_log["adl"] += L_ADL.item()
-            loss_log["total"] += loss.item()
-
-            pbar.update(1)
-            if global_step % config.log_every == 0:
-                n = config.log_every
-                postfix = {
-                    "ftd": f"{loss_log['ftd'] / n:.4f}",
-                    "rec": f"{loss_log['rec'] / n:.4f}",
-                    "tot": f"{loss_log['total'] / n:.4f}",
-                }
-                if use_adl:
-                    postfix["adl"] = f"{loss_log['adl'] / n:.4f}"
-                pbar.set_postfix(postfix)
-                loss_log = {k: 0.0 for k in loss_log}
-
-            if config.save_every > 0 and global_step % config.save_every == 0:
-                sp = save_dir / f"lora_step_{global_step}"
-                save_lora(pipe.transformer, sp, accelerator=accelerator)
-                ok = (sp / "adapter_config.json").exists()
-                logger.info("Step %d saved: %s (%s)", global_step, sp, "OK" if ok else "MISSING adapter_config!")
-
-    pbar.close()
-
-    # ── Final save ──────────────────────────────────────────────────────
-    final = save_dir / "lora_final"
-    save_lora(pipe.transformer, final, accelerator=accelerator)
-    logger.info("Final LoRA saved: %s", final)
-
-    return {
-        "final_path": str(final),
-        "steps": global_step,
-    }
+        return {
+            "final_path": str(final),
+            "steps": global_step,
+            "wandb_enabled": bool(wandb_run is not None),
+        }
+    finally:
+        pbar.close()
+        if wandb_run is not None:
+            wandb_run.finish()

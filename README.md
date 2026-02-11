@@ -21,7 +21,7 @@ For FTD training, install the optional training dependencies:
 uv pip install -e ".[training]"
 ```
 
-This adds `peft` (LoRA) and `lpips` (perceptual loss).
+This adds `peft` (LoRA), `lpips` (perceptual loss), and `wandb` (native Phase 2 logging).
 
 ## 2. Generate Data (Phase 1)
 
@@ -124,6 +124,20 @@ Key options:
 | `--gradient-checkpointing` / `--no-gradient-checkpointing` | on | Reduce VRAM at cost of speed |
 | `--mixed-precision` | no | `no`, `fp16`, or `bf16` |
 | `--seed` | none | Reproducibility seed |
+| `--wandb` / `--no-wandb` | off | Enable native WandB logging for training |
+| `--wandb-project` | zimagesr | WandB project name |
+| `--wandb-mode` | online | `online` or `offline` |
+| `--wandb-log-checkpoints` | on | Log saved LoRA checkpoints as model artifacts |
+
+Enable WandB example:
+
+```bash
+zimagesr-data train \
+  --pairs-dir ./zimage_offline_pairs/pairs \
+  --wandb \
+  --wandb-project zimagesr \
+  --wandb-run-name ftd-run-001
+```
 
 LoRA checkpoints are saved as PEFT adapters (`adapter_config.json` + safetensors).
 
