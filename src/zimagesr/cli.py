@@ -16,7 +16,81 @@ from zimagesr.data.s3_io import (
     upload_dir_to_s3,
     write_sync_report,
 )
-from zimagesr.training.config import TrainConfig
+
+_TRAIN_CONFIG_IMPORT_ERROR: Exception | None = None
+try:
+    from zimagesr.training.config import TrainConfig as _TrainConfig
+except ImportError as exc:  # pragma: no cover - exercised on partial installs
+    _TrainConfig = None
+    _TRAIN_CONFIG_IMPORT_ERROR = exc
+
+
+def _train_defaults() -> dict[str, object]:
+    """Return defaults used for train/generate-zl CLI arguments.
+
+    Falls back to literal values when ``zimagesr.training`` is unavailable,
+    which keeps data-only commands (e.g. ``gather``) operational.
+    """
+    if _TrainConfig is not None:
+        return {
+            "model_id": _TrainConfig.model_id,
+            "tl": _TrainConfig.tl,
+            "batch_size": _TrainConfig.batch_size,
+            "gradient_accumulation_steps": _TrainConfig.gradient_accumulation_steps,
+            "learning_rate": _TrainConfig.learning_rate,
+            "max_steps": _TrainConfig.max_steps,
+            "rec_loss_every": _TrainConfig.rec_loss_every,
+            "lambda_tvlpips": _TrainConfig.lambda_tvlpips,
+            "gamma_tv": _TrainConfig.gamma_tv,
+            "detach_recon": _TrainConfig.detach_recon,
+            "lambda_adl": _TrainConfig.lambda_adl,
+            "lora_rank": _TrainConfig.lora_rank,
+            "lora_alpha": _TrainConfig.lora_alpha,
+            "lora_dropout": _TrainConfig.lora_dropout,
+            "save_dir": _TrainConfig.save_dir,
+            "save_every": _TrainConfig.save_every,
+            "log_every": _TrainConfig.log_every,
+            "mixed_precision": _TrainConfig.mixed_precision,
+            "gradient_checkpointing": _TrainConfig.gradient_checkpointing,
+            "disable_vae_force_upcast": _TrainConfig.disable_vae_force_upcast,
+            "num_workers": _TrainConfig.num_workers,
+            "seed": _TrainConfig.seed,
+        }
+    return {
+        "model_id": "Tongyi-MAI/Z-Image-Turbo",
+        "tl": 0.25,
+        "batch_size": 4,
+        "gradient_accumulation_steps": 2,
+        "learning_rate": 5e-5,
+        "max_steps": 750,
+        "rec_loss_every": 8,
+        "lambda_tvlpips": 1.0,
+        "gamma_tv": 0.5,
+        "detach_recon": True,
+        "lambda_adl": 0.0,
+        "lora_rank": 16,
+        "lora_alpha": 16,
+        "lora_dropout": 0.0,
+        "save_dir": Path("./zimage_sr_lora_runs/ftd_run"),
+        "save_every": 150,
+        "log_every": 20,
+        "mixed_precision": "no",
+        "gradient_checkpointing": True,
+        "disable_vae_force_upcast": True,
+        "num_workers": 2,
+        "seed": None,
+    }
+
+
+def _load_train_config():
+    """Import and return TrainConfig with a clear error on partial installs."""
+    if _TrainConfig is None:
+        raise RuntimeError(
+            "Training config module is unavailable (`zimagesr.training`). "
+            "If you only need data gathering, use `gather/degrade/inspect/s3-*`. "
+            "For training commands, ensure repo includes `src/zimagesr/training/`."
+        ) from _TRAIN_CONFIG_IMPORT_ERROR
+    return _TrainConfig
 
 
 def _add_gather_args(parser: argparse.ArgumentParser) -> None:
@@ -72,47 +146,49 @@ def _add_gather_args(parser: argparse.ArgumentParser) -> None:
 
 def _add_train_args(parser: argparse.ArgumentParser) -> None:
     """Add TrainConfig arguments to the given parser."""
+    defaults = _train_defaults()
     parser.add_argument("--pairs-dir", type=Path, required=True, help="Path to pairs/ directory")
-    parser.add_argument("--model-id", default=TrainConfig.model_id)
-    parser.add_argument("--tl", type=float, default=TrainConfig.tl)
-    parser.add_argument("--batch-size", type=int, default=TrainConfig.batch_size)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=TrainConfig.gradient_accumulation_steps)
-    parser.add_argument("--learning-rate", type=float, default=TrainConfig.learning_rate)
-    parser.add_argument("--max-steps", type=int, default=TrainConfig.max_steps)
-    parser.add_argument("--rec-loss-every", type=int, default=TrainConfig.rec_loss_every)
-    parser.add_argument("--lambda-tvlpips", type=float, default=TrainConfig.lambda_tvlpips)
-    parser.add_argument("--gamma-tv", type=float, default=TrainConfig.gamma_tv)
+    parser.add_argument("--model-id", default=defaults["model_id"])
+    parser.add_argument("--tl", type=float, default=defaults["tl"])
+    parser.add_argument("--batch-size", type=int, default=defaults["batch_size"])
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=defaults["gradient_accumulation_steps"])
+    parser.add_argument("--learning-rate", type=float, default=defaults["learning_rate"])
+    parser.add_argument("--max-steps", type=int, default=defaults["max_steps"])
+    parser.add_argument("--rec-loss-every", type=int, default=defaults["rec_loss_every"])
+    parser.add_argument("--lambda-tvlpips", type=float, default=defaults["lambda_tvlpips"])
+    parser.add_argument("--gamma-tv", type=float, default=defaults["gamma_tv"])
     parser.add_argument(
         "--detach-recon",
         action=argparse.BooleanOptionalAction,
-        default=TrainConfig.detach_recon,
+        default=defaults["detach_recon"],
     )
-    parser.add_argument("--lambda-adl", type=float, default=TrainConfig.lambda_adl)
-    parser.add_argument("--lora-rank", type=int, default=TrainConfig.lora_rank)
-    parser.add_argument("--lora-alpha", type=int, default=TrainConfig.lora_alpha)
-    parser.add_argument("--lora-dropout", type=float, default=TrainConfig.lora_dropout)
-    parser.add_argument("--save-dir", type=Path, default=TrainConfig.save_dir)
-    parser.add_argument("--save-every", type=int, default=TrainConfig.save_every)
-    parser.add_argument("--log-every", type=int, default=TrainConfig.log_every)
+    parser.add_argument("--lambda-adl", type=float, default=defaults["lambda_adl"])
+    parser.add_argument("--lora-rank", type=int, default=defaults["lora_rank"])
+    parser.add_argument("--lora-alpha", type=int, default=defaults["lora_alpha"])
+    parser.add_argument("--lora-dropout", type=float, default=defaults["lora_dropout"])
+    parser.add_argument("--save-dir", type=Path, default=defaults["save_dir"])
+    parser.add_argument("--save-every", type=int, default=defaults["save_every"])
+    parser.add_argument("--log-every", type=int, default=defaults["log_every"])
     parser.add_argument("--device", default=None)
     parser.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
-    parser.add_argument("--mixed-precision", choices=["no", "fp16", "bf16"], default=TrainConfig.mixed_precision)
+    parser.add_argument("--mixed-precision", choices=["no", "fp16", "bf16"], default=defaults["mixed_precision"])
     parser.add_argument(
         "--gradient-checkpointing",
         action=argparse.BooleanOptionalAction,
-        default=TrainConfig.gradient_checkpointing,
+        default=defaults["gradient_checkpointing"],
     )
     parser.add_argument(
         "--disable-vae-force-upcast",
         action=argparse.BooleanOptionalAction,
-        default=TrainConfig.disable_vae_force_upcast,
+        default=defaults["disable_vae_force_upcast"],
     )
-    parser.add_argument("--num-workers", type=int, default=TrainConfig.num_workers)
-    parser.add_argument("--seed", type=int, default=TrainConfig.seed)
+    parser.add_argument("--num-workers", type=int, default=defaults["num_workers"])
+    parser.add_argument("--seed", type=int, default=defaults["seed"])
 
 
-def _train_config_from_args(args: argparse.Namespace) -> TrainConfig:
+def _train_config_from_args(args: argparse.Namespace):
     """Construct a TrainConfig from parsed CLI arguments."""
+    TrainConfig = _load_train_config()
     return TrainConfig(
         pairs_dir=args.pairs_dir,
         model_id=args.model_id,
@@ -220,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     gen_zl = sub.add_parser("generate-zl", help="Encode lr_up.png -> zL.pt for each pair.")
     gen_zl.add_argument("--out-dir", type=Path, required=True, help="Path to dataset dir containing pairs/")
-    gen_zl.add_argument("--model-id", default=TrainConfig.model_id)
+    gen_zl.add_argument("--model-id", default=_train_defaults()["model_id"])
     gen_zl.add_argument("--device", default=None)
     gen_zl.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
     gen_zl.add_argument(
@@ -307,8 +383,10 @@ def main() -> None:
             from zimagesr.training.train import ftd_train_loop
         except ImportError as exc:
             raise RuntimeError(
-                "Training requires peft and lpips. "
-                "Install with: pip install zimagesr[training]"
+                "Training command requires `zimagesr.training` modules plus "
+                "optional deps (`peft`, `lpips`). "
+                "Ensure repo has `src/zimagesr/training/`, then run: "
+                "uv sync && uv pip install -e '.[training]'"
             ) from exc
         result = ftd_train_loop(_train_config_from_args(args))
         print(json.dumps(result, indent=2))
@@ -319,8 +397,9 @@ def main() -> None:
             from zimagesr.training.dataset import generate_zl_latents
         except ImportError as exc:
             raise RuntimeError(
-                "generate-zl requires training dependencies. "
-                "Install with: pip install zimagesr[training]"
+                "generate-zl requires `zimagesr.training.dataset`. "
+                "Ensure repo has `src/zimagesr/training/`, then run: "
+                "uv sync && uv pip install -e '.[training]'"
             ) from exc
 
         import torch

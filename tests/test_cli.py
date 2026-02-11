@@ -199,3 +199,17 @@ def test_c10_main_s3_download_dispatch(monkeypatch, capsys):
     cli.main()
     out = capsys.readouterr().out
     assert json.loads(out) == {"downloaded_files": 2}
+
+
+def test_c11_parser_still_works_without_training_module(monkeypatch):
+    monkeypatch.setattr(cli, "_TrainConfig", None)
+    monkeypatch.setattr(cli, "_TRAIN_CONFIG_IMPORT_ERROR", ModuleNotFoundError("zimagesr.training"))
+
+    parser = cli.build_parser()
+    gather_args = parser.parse_args(["gather", "--n", "1"])
+    assert gather_args.command == "gather"
+    train_args = parser.parse_args(["train", "--pairs-dir", "/tmp/pairs"])
+    assert train_args.command == "train"
+
+    with pytest.raises(RuntimeError, match="Training config module is unavailable"):
+        cli._train_config_from_args(train_args)
