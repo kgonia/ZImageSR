@@ -163,10 +163,13 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
     # be on the correct rank device for recon loss decoding).
     pipe.vae.to(device)
 
-    # ── TV-LPIPS loss (lazy, moved to device only when needed) ──────────
+    # ── TV-LPIPS loss (initialized once, pinned to training device) ─────
     tv_lpips: TVLPIPSLoss | None = None
     if config.rec_loss_every > 0:
         tv_lpips = TVLPIPSLoss(gamma=config.gamma_tv).eval()
+        # Eagerly initialize LPIPS once so .to(device) can move real weights.
+        tv_lpips._ensure_lpips()
+        tv_lpips.to(device)
         for p in tv_lpips.parameters():
             p.requires_grad_(False)
 
@@ -266,9 +269,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
 
                                 L_MSE = F.mse_loss(x0_hat, x_HR)
 
-                                tv_lpips.to(device)
                                 L_TVLP = tv_lpips(x0_hat.float(), x_HR.float())
-                                tv_lpips.to("cpu")
 
                             L_Rec = (L_MSE + config.lambda_tvlpips * L_TVLP).to(device=device, dtype=dtype)
                         else:
@@ -284,9 +285,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
 
                             L_MSE = F.mse_loss(x0_hat, x_HR)
 
-                            tv_lpips.to(device)
                             L_TVLP = tv_lpips(x0_hat.float(), x_HR.float())
-                            tv_lpips.to("cpu")
 
                             L_Rec = L_MSE + config.lambda_tvlpips * L_TVLP
 
