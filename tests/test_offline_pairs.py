@@ -683,3 +683,54 @@ def test_u31_inspect_local_pairs_structure(tmp_path):
     assert row["x0"]["size"] == [64, 64]
     assert row["lr"]["size"] == [16, 16]
     assert row["lr_up"]["size"] == [64, 64]
+
+
+def test_u32_gather_prompt_embed_mode_uses_prompt_none_and_detaches_text_encoder(
+    tmp_path,
+    gather_config_factory,
+    mock_pipeline_factory,
+    monkeypatch,
+):
+    pipe = mock_pipeline_factory()
+    monkeypatch.setattr(op, "load_pipeline", lambda *args, **kwargs: pipe)
+    monkeypatch.setattr(op, "resolve_device_dtype", lambda *_a, **_k: ("cpu", torch.float32, "float32"))
+
+    cfg = gather_config_factory(
+        out_dir=tmp_path / "run",
+        n=1,
+        cache_null_prompt=True,
+        offload_text_encoder=True,
+        save_x0_png=False,
+        debug=False,
+    )
+    op.gather_offline_pairs(cfg)
+
+    assert pipe.calls[0]["prompt"] is None
+    assert pipe.calls[0]["prompt_embeds"] is not None
+    assert pipe.text_encoder is None
+
+
+def test_u33_gather_skips_text_encoder_offload_without_cached_prompt_embeds(
+    tmp_path,
+    gather_config_factory,
+    mock_pipeline_factory,
+    monkeypatch,
+):
+    pipe = mock_pipeline_factory()
+    monkeypatch.setattr(op, "load_pipeline", lambda *args, **kwargs: pipe)
+    monkeypatch.setattr(op, "resolve_device_dtype", lambda *_a, **_k: ("cpu", torch.float32, "float32"))
+
+    cfg = gather_config_factory(
+        out_dir=tmp_path / "run",
+        n=1,
+        cache_null_prompt=False,
+        offload_text_encoder=True,
+        prompt="hello",
+        save_x0_png=False,
+        debug=False,
+    )
+    op.gather_offline_pairs(cfg)
+
+    assert pipe.calls[0]["prompt"] == "hello"
+    assert pipe.calls[0]["prompt_embeds"] is None
+    assert pipe.text_encoder is not None

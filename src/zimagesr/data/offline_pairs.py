@@ -141,6 +141,27 @@ def inspect_pipe_support(pipe) -> dict[str, bool]:
     }
 
 
+def _resolve_execution_device(pipe, fallback: str) -> str:
+    """Best-effort resolution of diffusers runtime device for intermediates."""
+    try:
+        dev = getattr(pipe, "_execution_device")
+        if dev is None:
+            return fallback
+        return str(torch.device(dev))
+    except Exception:
+        return fallback
+
+
+def _devices_compatible(requested: str, actual: str) -> bool:
+    req = torch.device(requested)
+    act = torch.device(actual)
+    if req.type != act.type:
+        return False
+    if req.index is not None and act.index is not None and req.index != act.index:
+        return False
+    return True
+
+
 def unwrap_first_tensor(x: Any) -> Any:
     if x is None:
         return None
@@ -356,12 +377,6 @@ def gather_offline_pairs(config: GatherConfig) -> None:
             negative_prompt=config.negative_prompt,
         )
 
-    if support["prompt_embeds"] and config.offload_text_encoder:
-        if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
-            pipe.text_encoder.to("cpu")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
     _print_stage(3, total_steps, "Inferring latent shape and writing metadata")
     latent_shape = infer_latent_shape(pipe, config.hr_size, device=device, dtype=torch_dtype)
     write_metadata(
@@ -381,6 +396,41 @@ def gather_offline_pairs(config: GatherConfig) -> None:
         pipe.unet.to(device=device, dtype=torch_dtype)
     if hasattr(pipe, "vae") and pipe.vae is not None:
         pipe.vae.to(device=device, dtype=torch_dtype)
+
+    probe_prompt_embeds = None
+    if support["prompt_embeds"] and null_prompt_embeds is not None:
+        probe_prompt_embeds = normalize_prompt_embeds(null_prompt_embeds, device=device, dtype=torch_dtype)
+
+    if config.offload_text_encoder and hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
+        if probe_prompt_embeds is not None:
+            # Diffusers resolves execution device from module order; dropping text_encoder
+            # avoids CPU timesteps while keeping prompt-embed mode active.
+            pipe.text_encoder = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        else:
+            print(
+                "Skipping text-encoder offload because prompt embeds are unavailable; "
+                "offloading would force CPU execution in this pipeline."
+            )
+
+    runtime_device = _resolve_execution_device(pipe, fallback=device)
+    if not _devices_compatible(device, runtime_device):
+        raise RuntimeError(
+            f"Pipeline execution device mismatch: requested '{device}', resolved '{runtime_device}'. "
+            "Disable --offload-text-encoder or enable --cache-null-prompt."
+        )
+
+    cached_prompt_embeds = None
+    cached_negative_prompt_embeds = None
+    if support["prompt_embeds"] and null_prompt_embeds is not None:
+        cached_prompt_embeds = normalize_prompt_embeds(null_prompt_embeds, device=runtime_device, dtype=torch_dtype)
+        if support["negative_prompt_embeds"] and null_negative_prompt_embeds is not None:
+            cached_negative_prompt_embeds = normalize_prompt_embeds(
+                null_negative_prompt_embeds,
+                device=runtime_device,
+                dtype=torch_dtype,
+            )
 
     call_sig = inspect.signature(pipe.__call__)
     call_params = set(call_sig.parameters)
@@ -407,10 +457,10 @@ def gather_offline_pairs(config: GatherConfig) -> None:
         if config.skip_existing and should_skip_sample(sample_dir, config.save_x0_png):
             continue
 
-        eps_gen = torch.Generator(device=device).manual_seed(config.base_seed + i)
-        eps = torch.randn(latent_shape, device=device, dtype=torch_dtype, generator=eps_gen)
-        pipe_gen = torch.Generator(device=device).manual_seed(config.base_seed + config.n + i)
-        init = torch.zeros((1, 3, config.hr_size, config.hr_size), device=device, dtype=torch_dtype)
+        eps_gen = torch.Generator(device=runtime_device).manual_seed(config.base_seed + i)
+        eps = torch.randn(latent_shape, device=runtime_device, dtype=torch_dtype, generator=eps_gen)
+        pipe_gen = torch.Generator(device=runtime_device).manual_seed(config.base_seed + config.n + i)
+        init = torch.zeros((1, 3, config.hr_size, config.hr_size), device=runtime_device, dtype=torch_dtype)
 
         call_kwargs: dict[str, Any] = {
             "image": init,
@@ -423,24 +473,14 @@ def gather_offline_pairs(config: GatherConfig) -> None:
             "latents": eps,
             "output_type": "latent",
         }
-        pe_list: list[torch.Tensor] | None = None
-        ne_list: list[torch.Tensor] | None = None
+        pe_list: list[torch.Tensor] | None = cached_prompt_embeds
+        ne_list: list[torch.Tensor] | None = cached_negative_prompt_embeds
 
-        if support["prompt_embeds"] and null_prompt_embeds is not None:
-            pe_list = normalize_prompt_embeds(null_prompt_embeds, device=device, dtype=torch_dtype)
-            if pe_list is not None:
-                call_kwargs["prompt_embeds"] = pe_list
-                if support["negative_prompt_embeds"] and null_negative_prompt_embeds is not None:
-                    ne_list = normalize_prompt_embeds(
-                        null_negative_prompt_embeds,
-                        device=device,
-                        dtype=torch_dtype,
-                    )
-                    if ne_list is not None:
-                        call_kwargs["negative_prompt_embeds"] = ne_list
-                call_kwargs["prompt"] = ""
-            else:
-                call_kwargs["prompt"] = config.prompt
+        if pe_list is not None:
+            call_kwargs["prompt_embeds"] = pe_list
+            if ne_list is not None:
+                call_kwargs["negative_prompt_embeds"] = ne_list
+            call_kwargs["prompt"] = None
         else:
             call_kwargs["prompt"] = config.prompt
             if support["negative_prompt"]:
