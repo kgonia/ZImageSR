@@ -189,3 +189,46 @@ def mock_pipeline_factory(torch_mod):
             return SimpleNamespace(images=images)
 
     return FakePipe
+
+
+@pytest.fixture
+def fake_zimage_transformer_factory(torch_mod):
+    torch = torch_mod
+
+    class FakeZImageTransformer(torch.nn.Module):
+        """Mimics Z-Image transformer: accepts List[Tensor(C,1,H,W)]."""
+
+        def __init__(self, *, cap_feat_dim: int = 2560):
+            super().__init__()
+            self.config = SimpleNamespace(cap_feat_dim=cap_feat_dim, t_scale=1000.0)
+            self.forward_calls: list = []
+
+        def forward(self, all_image, t, all_cap_feats, return_dict=True):
+            self.forward_calls.append(
+                {
+                    "all_image_len": len(all_image),
+                    "shapes": [tuple(x.shape) for x in all_image],
+                    "t": t,
+                }
+            )
+            out = [img.clone() * 0.1 for img in all_image]
+            if return_dict:
+                return SimpleNamespace(sample=out)
+            return (out,)
+
+    return FakeZImageTransformer
+
+
+@pytest.fixture
+def fake_training_pairs(tmp_path, torch_mod):
+    """Create a minimal pairs directory with 3 samples for training tests."""
+    torch = torch_mod
+    pairs_dir = tmp_path / "pairs"
+    C, H, W = 16, 8, 8
+    for i in range(3):
+        d = pairs_dir / f"{i:04d}"
+        d.mkdir(parents=True)
+        torch.save(torch.randn(1, C, H, W), d / "eps.pt")
+        torch.save(torch.randn(1, C, H, W), d / "z0.pt")
+        torch.save(torch.randn(1, C, H, W), d / "zL.pt")
+    return pairs_dir

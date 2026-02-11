@@ -16,6 +16,7 @@ from zimagesr.data.s3_io import (
     upload_dir_to_s3,
     write_sync_report,
 )
+from zimagesr.training.config import TrainConfig
 
 
 def _add_gather_args(parser: argparse.ArgumentParser) -> None:
@@ -67,6 +68,78 @@ def _add_gather_args(parser: argparse.ArgumentParser) -> None:
         default=GatherConfig.debug,
     )
     parser.add_argument("--debug-every", type=int, default=GatherConfig.debug_every)
+
+
+def _add_train_args(parser: argparse.ArgumentParser) -> None:
+    """Add TrainConfig arguments to the given parser."""
+    parser.add_argument("--pairs-dir", type=Path, required=True, help="Path to pairs/ directory")
+    parser.add_argument("--model-id", default=TrainConfig.model_id)
+    parser.add_argument("--tl", type=float, default=TrainConfig.tl)
+    parser.add_argument("--batch-size", type=int, default=TrainConfig.batch_size)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=TrainConfig.gradient_accumulation_steps)
+    parser.add_argument("--learning-rate", type=float, default=TrainConfig.learning_rate)
+    parser.add_argument("--max-steps", type=int, default=TrainConfig.max_steps)
+    parser.add_argument("--rec-loss-every", type=int, default=TrainConfig.rec_loss_every)
+    parser.add_argument("--lambda-tvlpips", type=float, default=TrainConfig.lambda_tvlpips)
+    parser.add_argument("--gamma-tv", type=float, default=TrainConfig.gamma_tv)
+    parser.add_argument(
+        "--detach-recon",
+        action=argparse.BooleanOptionalAction,
+        default=TrainConfig.detach_recon,
+    )
+    parser.add_argument("--lambda-adl", type=float, default=TrainConfig.lambda_adl)
+    parser.add_argument("--lora-rank", type=int, default=TrainConfig.lora_rank)
+    parser.add_argument("--lora-alpha", type=int, default=TrainConfig.lora_alpha)
+    parser.add_argument("--lora-dropout", type=float, default=TrainConfig.lora_dropout)
+    parser.add_argument("--save-dir", type=Path, default=TrainConfig.save_dir)
+    parser.add_argument("--save-every", type=int, default=TrainConfig.save_every)
+    parser.add_argument("--log-every", type=int, default=TrainConfig.log_every)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
+    parser.add_argument("--mixed-precision", choices=["no", "fp16", "bf16"], default=TrainConfig.mixed_precision)
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=TrainConfig.gradient_checkpointing,
+    )
+    parser.add_argument(
+        "--disable-vae-force-upcast",
+        action=argparse.BooleanOptionalAction,
+        default=TrainConfig.disable_vae_force_upcast,
+    )
+    parser.add_argument("--num-workers", type=int, default=TrainConfig.num_workers)
+    parser.add_argument("--seed", type=int, default=TrainConfig.seed)
+
+
+def _train_config_from_args(args: argparse.Namespace) -> TrainConfig:
+    """Construct a TrainConfig from parsed CLI arguments."""
+    return TrainConfig(
+        pairs_dir=args.pairs_dir,
+        model_id=args.model_id,
+        tl=args.tl,
+        batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.learning_rate,
+        max_steps=args.max_steps,
+        rec_loss_every=args.rec_loss_every,
+        lambda_tvlpips=args.lambda_tvlpips,
+        gamma_tv=args.gamma_tv,
+        detach_recon=args.detach_recon,
+        lambda_adl=args.lambda_adl,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        save_dir=args.save_dir,
+        save_every=args.save_every,
+        log_every=args.log_every,
+        device=args.device,
+        dtype=args.dtype,
+        mixed_precision=args.mixed_precision,
+        gradient_checkpointing=args.gradient_checkpointing,
+        disable_vae_force_upcast=args.disable_vae_force_upcast,
+        num_workers=args.num_workers,
+        seed=args.seed,
+    )
 
 
 def _gather_config_from_args(args: argparse.Namespace) -> GatherConfig:
@@ -142,6 +215,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s3_download.add_argument("--report-json", type=Path, default=None)
 
+    train_cmd = sub.add_parser("train", help="Run FTD training with LoRA.")
+    _add_train_args(train_cmd)
+
+    gen_zl = sub.add_parser("generate-zl", help="Encode lr_up.png -> zL.pt for each pair.")
+    gen_zl.add_argument("--out-dir", type=Path, required=True, help="Path to dataset dir containing pairs/")
+    gen_zl.add_argument("--model-id", default=TrainConfig.model_id)
+    gen_zl.add_argument("--device", default=None)
+    gen_zl.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
+    gen_zl.add_argument(
+        "--skip-existing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+
     zenml_run = sub.add_parser(
         "zenml-run",
         help="Run minimal ZenML wrapper pipelines for gather/download.",
@@ -213,6 +300,40 @@ def main() -> None:
         print(json.dumps(result.to_dict(), indent=2))
         if args.report_json is not None:
             write_sync_report(args.report_json, result)
+        return
+
+    if args.command == "train":
+        try:
+            from zimagesr.training.train import ftd_train_loop
+        except ImportError as exc:
+            raise RuntimeError(
+                "Training requires peft and lpips. "
+                "Install with: pip install zimagesr[training]"
+            ) from exc
+        result = ftd_train_loop(_train_config_from_args(args))
+        print(json.dumps(result, indent=2))
+        return
+
+    if args.command == "generate-zl":
+        try:
+            from zimagesr.training.dataset import generate_zl_latents
+        except ImportError as exc:
+            raise RuntimeError(
+                "generate-zl requires training dependencies. "
+                "Install with: pip install zimagesr[training]"
+            ) from exc
+
+        import torch
+        from diffusers import ZImageImg2ImgPipeline
+
+        device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        dtype_map = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+        dtype = dtype_map[args.dtype] if args.dtype else (torch.float32 if device == "cpu" else torch.bfloat16)
+
+        pipe = ZImageImg2ImgPipeline.from_pretrained(args.model_id, torch_dtype=dtype).to(device)
+        pairs_dir = args.out_dir / "pairs"
+        count = generate_zl_latents(pairs_dir, pipe, device, dtype, skip_existing=args.skip_existing)
+        print(f"Created {count} zL.pt files")
         return
 
     if args.command == "zenml-run":

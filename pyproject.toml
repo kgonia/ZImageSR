@@ -22,6 +22,9 @@ dependencies = [
 zimagesr-data = "zimagesr.cli:main"
 zimagesr-zenml-bootstrap = "zimagesr.pipelines.zenml_bootstrap:main"
 
+[project.optional-dependencies]
+training = ["peft", "lpips"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -38,5 +41,7 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "lpips",
+    "peft",
     "pytest>=9.0.2",
 ]

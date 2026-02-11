@@ -1,8 +1,9 @@
 # ZImageSR
 
-Data-gathering utilities for the first stage of FluxSR-style training with Z-Image:
-- generate offline `(eps, z0, x0)` pairs
-- generate placeholder LR images
+FluxSR-style super-resolution pipeline for Z-Image Turbo:
+- **Stage 0** — generate offline `(eps, z0, x0)` pairs and placeholder LR images
+- **FTD Training** — Flow Trajectory Distillation with LoRA on the Z-Image transformer
+- **One-step SR inference** — single forward pass super-resolution from a degraded latent
 - inspect tensor/image/model shapes for debugging
 - upload/download dataset bundles with S3
 - orchestrate runs with minimal ZenML wrappers
@@ -13,6 +14,14 @@ Data-gathering utilities for the first stage of FluxSR-style training with Z-Ima
 uv sync
 uv pip install -e .
 ```
+
+For FTD training, install the optional training dependencies:
+
+```bash
+uv pip install -e ".[training]"
+```
+
+This adds `peft` (LoRA) and `lpips` (perceptual loss).
 
 ## 2. Generate Data (Phase 1)
 
@@ -71,7 +80,110 @@ zimagesr-data s3-download \
   --s3-uri s3://YOUR_BUCKET/zimagesr/run-001
 ```
 
-## 5. ZenML Minimal Pipelines
+## 5. FTD Training (Phase 2)
+
+FTD (Flow Trajectory Distillation) trains a LoRA adapter on the Z-Image transformer
+so it can predict clean latents from degraded ones in a single forward pass.
+Implements FluxSR paper Eq. 16/17 (FTD loss) and Eq. 18/21 (pixel reconstruction loss).
+
+### Prepare zL latents
+
+If your pairs directory does not yet contain `zL.pt` files (VAE-encoded LR images),
+generate them first:
+
+```bash
+zimagesr-data generate-zl \
+  --out-dir ./zimage_offline_pairs \
+  --model-id Tongyi-MAI/Z-Image-Turbo
+```
+
+### Run training
+
+```bash
+zimagesr-data train \
+  --pairs-dir ./zimage_offline_pairs/pairs \
+  --max-steps 750 \
+  --batch-size 4 \
+  --gradient-accumulation-steps 2 \
+  --learning-rate 5e-5 \
+  --tl 0.25 \
+  --lora-rank 16 \
+  --save-dir ./zimage_sr_lora_runs/ftd_run \
+  --save-every 150
+```
+
+Key options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--tl` | 0.25 | Truncation level TL |
+| `--rec-loss-every` | 8 | Pixel recon loss frequency (0 to disable) |
+| `--lambda-tvlpips` | 1.0 | Weight for TV-LPIPS recon loss |
+| `--lambda-adl` | 0.0 | ADL regularization weight (set > 0 to enable) |
+| `--detach-recon` / `--no-detach-recon` | on | Gradient-free recon (saves VRAM) |
+| `--gradient-checkpointing` / `--no-gradient-checkpointing` | on | Reduce VRAM at cost of speed |
+| `--mixed-precision` | no | `no`, `fp16`, or `bf16` |
+| `--seed` | none | Reproducibility seed |
+
+LoRA checkpoints are saved as PEFT adapters (`adapter_config.json` + safetensors).
+
+### Dataset layout
+
+Each sample directory under `pairs/` should contain:
+
+```
+pairs/0000/
+  eps.pt        # noise tensor (1, 16, 128, 128)
+  z0.pt         # clean latent  (1, 16, 128, 128)
+  zL.pt         # degraded latent (1, 16, 128, 128)
+  x0.png        # (optional) HR ground truth for recon loss
+  lr_up.png     # (optional) upscaled LR image for zL generation
+```
+
+## 6. One-step SR Inference
+
+After training, run single-step super-resolution from Python:
+
+```python
+import torch
+from diffusers import ZImageImg2ImgPipeline, ZImageTransformer2DModel
+from zimagesr.training.inference import one_step_sr
+from zimagesr.training.lora import load_lora_for_inference
+from zimagesr.training.transformer_utils import prepare_cap_feats
+
+device, dtype = "cuda", torch.bfloat16
+
+# Load pipeline (needed for VAE) and base transformer
+pipe = ZImageImg2ImgPipeline.from_pretrained(
+    "Tongyi-MAI/Z-Image-Turbo", torch_dtype=dtype
+).to(device)
+
+base_tr = pipe.transformer
+base_tr.requires_grad_(False)
+
+# Load LoRA adapter
+lora_tr = load_lora_for_inference(base_tr, "path/to/lora_final", device, dtype)
+
+# Prepare null caption features
+cap_feats = prepare_cap_feats(pipe, device, dtype)  # (1, 2560)
+
+# Load a degraded latent
+zL = torch.load("path/to/pairs/0000/zL.pt", weights_only=True).to(device=device, dtype=dtype)
+
+# Run one-step SR
+pil_image = one_step_sr(
+    transformer=lora_tr,
+    vae=pipe.vae,
+    lr_latent=zL,
+    tl=0.25,
+    t_scale=1000.0,
+    vae_sf=0.3611,
+    cap_feats_2d=cap_feats,
+)
+pil_image.save("sr_output.png")
+```
+
+## 7. ZenML Minimal Pipelines
 
 Run gather pipeline:
 
@@ -97,7 +209,7 @@ zimagesr-data zenml-run \
   --out-dir ./zimage_offline_pairs
 ```
 
-## 6. ZenML Stack Bootstrap
+## 8. ZenML Stack Bootstrap
 
 The repository ships with `zenml.yaml`, used by the dedicated bootstrap helper.
 
@@ -135,5 +247,7 @@ zimagesr-zenml-bootstrap --config zenml.yaml --activate-stack zimagesr-s3-stack
 ## Notes
 
 - The gather pipeline requires a Z-Image pipeline variant that accepts `latents=`.
+- FTD training requires a GPU with sufficient VRAM (tested on 40 GB A100). Reduce `--batch-size` and increase `--gradient-accumulation-steps` for smaller GPUs.
 - `torch`/CUDA installation is environment-specific; install the wheel that matches your CUDA runtime.
 - S3 sync uses `boto3` default credential chain.
+- `peft` and `lpips` are only needed for training and are not required for data generation or S3 sync.
