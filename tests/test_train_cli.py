@@ -23,6 +23,7 @@ class TestAddTrainArgs:
         assert args.max_steps == TrainConfig.max_steps
         assert args.lora_rank == TrainConfig.lora_rank
         assert args.lambda_adl == TrainConfig.lambda_adl
+        assert args.save_dir.name.startswith("ftd_run_")
         assert args.wandb == TrainConfig.wandb_enabled
         assert args.wandb_project == TrainConfig.wandb_project
         assert args.wandb_mode == TrainConfig.wandb_mode

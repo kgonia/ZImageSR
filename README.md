@@ -124,6 +124,7 @@ Key options:
 | `--gradient-checkpointing` / `--no-gradient-checkpointing` | on | Reduce VRAM at cost of speed |
 | `--mixed-precision` | no | `no`, `fp16`, or `bf16` |
 | `--seed` | none | Reproducibility seed |
+| `--save-dir` | `./zimage_sr_lora_runs/ftd_run_<timestamp>` | Checkpoint output directory |
 | `--wandb` / `--no-wandb` | off | Enable native WandB logging for training |
 | `--wandb-project` | zimagesr | WandB project name |
 | `--wandb-mode` | online | `online` or `offline` |

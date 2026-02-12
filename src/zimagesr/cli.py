@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 import json
 
@@ -32,36 +33,38 @@ def _train_defaults() -> dict[str, object]:
     which keeps data-only commands (e.g. ``gather``) operational.
     """
     if _TrainConfig is not None:
+        defaults_cfg = _TrainConfig(pairs_dir=Path("./pairs"))
         return {
-            "model_id": _TrainConfig.model_id,
-            "tl": _TrainConfig.tl,
-            "batch_size": _TrainConfig.batch_size,
-            "gradient_accumulation_steps": _TrainConfig.gradient_accumulation_steps,
-            "learning_rate": _TrainConfig.learning_rate,
-            "max_steps": _TrainConfig.max_steps,
-            "rec_loss_every": _TrainConfig.rec_loss_every,
-            "lambda_tvlpips": _TrainConfig.lambda_tvlpips,
-            "gamma_tv": _TrainConfig.gamma_tv,
-            "detach_recon": _TrainConfig.detach_recon,
-            "lambda_adl": _TrainConfig.lambda_adl,
-            "lora_rank": _TrainConfig.lora_rank,
-            "lora_alpha": _TrainConfig.lora_alpha,
-            "lora_dropout": _TrainConfig.lora_dropout,
-            "save_dir": _TrainConfig.save_dir,
-            "save_every": _TrainConfig.save_every,
-            "log_every": _TrainConfig.log_every,
-            "mixed_precision": _TrainConfig.mixed_precision,
-            "gradient_checkpointing": _TrainConfig.gradient_checkpointing,
-            "disable_vae_force_upcast": _TrainConfig.disable_vae_force_upcast,
-            "num_workers": _TrainConfig.num_workers,
-            "seed": _TrainConfig.seed,
-            "wandb_enabled": _TrainConfig.wandb_enabled,
-            "wandb_project": _TrainConfig.wandb_project,
-            "wandb_entity": _TrainConfig.wandb_entity,
-            "wandb_run_name": _TrainConfig.wandb_run_name,
-            "wandb_mode": _TrainConfig.wandb_mode,
-            "wandb_log_checkpoints": _TrainConfig.wandb_log_checkpoints,
+            "model_id": defaults_cfg.model_id,
+            "tl": defaults_cfg.tl,
+            "batch_size": defaults_cfg.batch_size,
+            "gradient_accumulation_steps": defaults_cfg.gradient_accumulation_steps,
+            "learning_rate": defaults_cfg.learning_rate,
+            "max_steps": defaults_cfg.max_steps,
+            "rec_loss_every": defaults_cfg.rec_loss_every,
+            "lambda_tvlpips": defaults_cfg.lambda_tvlpips,
+            "gamma_tv": defaults_cfg.gamma_tv,
+            "detach_recon": defaults_cfg.detach_recon,
+            "lambda_adl": defaults_cfg.lambda_adl,
+            "lora_rank": defaults_cfg.lora_rank,
+            "lora_alpha": defaults_cfg.lora_alpha,
+            "lora_dropout": defaults_cfg.lora_dropout,
+            "save_dir": defaults_cfg.save_dir,
+            "save_every": defaults_cfg.save_every,
+            "log_every": defaults_cfg.log_every,
+            "mixed_precision": defaults_cfg.mixed_precision,
+            "gradient_checkpointing": defaults_cfg.gradient_checkpointing,
+            "disable_vae_force_upcast": defaults_cfg.disable_vae_force_upcast,
+            "num_workers": defaults_cfg.num_workers,
+            "seed": defaults_cfg.seed,
+            "wandb_enabled": defaults_cfg.wandb_enabled,
+            "wandb_project": defaults_cfg.wandb_project,
+            "wandb_entity": defaults_cfg.wandb_entity,
+            "wandb_run_name": defaults_cfg.wandb_run_name,
+            "wandb_mode": defaults_cfg.wandb_mode,
+            "wandb_log_checkpoints": defaults_cfg.wandb_log_checkpoints,
         }
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return {
         "model_id": "Tongyi-MAI/Z-Image-Turbo",
         "tl": 0.25,
@@ -77,7 +80,7 @@ def _train_defaults() -> dict[str, object]:
         "lora_rank": 16,
         "lora_alpha": 16,
         "lora_dropout": 0.0,
-        "save_dir": Path("./zimage_sr_lora_runs/ftd_run"),
+        "save_dir": Path(f"./zimage_sr_lora_runs/ftd_run_{ts}"),
         "save_every": 150,
         "log_every": 20,
         "mixed_precision": "no",
@@ -281,6 +284,38 @@ def _gather_config_from_args(args: argparse.Namespace) -> GatherConfig:
     )
 
 
+def _lora_weight_stats(model) -> dict[str, float]:
+    """Return diagnostic stats for loaded LoRA adapter weights."""
+    a_abs, b_abs, count = 0.0, 0.0, 0
+    for name, param in model.named_parameters():
+        if "lora_A" in name:
+            a_abs += param.detach().abs().mean().item()
+            count += 1
+        elif "lora_B" in name:
+            b_abs += param.detach().abs().mean().item()
+    if count == 0:
+        return {"lora_layers": 0, "lora_A_mean_abs": 0.0, "lora_B_mean_abs": 0.0}
+    return {
+        "lora_layers": count,
+        "lora_A_mean_abs": round(a_abs / count, 8),
+        "lora_B_mean_abs": round(b_abs / count, 8),
+    }
+
+
+def _build_comparison_grid(images: list, labels: list[str]):
+    """Build a labeled side-by-side image grid from PIL images."""
+    from PIL import Image, ImageDraw
+
+    W, H = images[0].size
+    n = len(images)
+    canvas = Image.new("RGB", (W * n, H + 24), "white")
+    draw = ImageDraw.Draw(canvas)
+    for i, (img, lbl) in enumerate(zip(images, labels)):
+        canvas.paste(img.resize((W, H), resample=Image.BICUBIC), (W * i, 0))
+        draw.text((W * i + 4, H + 4), lbl, fill="black")
+    return canvas
+
+
 def _infer_default_output(pair_dir: Path | None, input_image: Path | None) -> Path:
     if pair_dir is not None:
         return pair_dir / "sr.png"
@@ -439,6 +474,12 @@ def build_parser() -> argparse.ArgumentParser:
     infer_cmd.add_argument("--tl", type=float, default=_train_defaults()["tl"])
     infer_cmd.add_argument("--device", default=None)
     infer_cmd.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
+    infer_cmd.add_argument(
+        "--compare-grid",
+        action="store_true",
+        default=False,
+        help="Save a comparison grid: LR | Base SR | LoRA SR (+ HR if pair has x0.png).",
+    )
 
     zenml_run = sub.add_parser(
         "zenml-run",
@@ -573,8 +614,14 @@ def main() -> None:
         t_scale = float(getattr(pipe.transformer.config, "t_scale", 1.0))
         vae_sf = float(getattr(pipe.vae.config, "scaling_factor", 1.0))
 
-        lora_tr = load_lora_for_inference(pipe.transformer, args.lora_path, device, dtype)
         cap_feats_2d = prepare_cap_feats(pipe, device, dtype)
+        lora_tr = load_lora_for_inference(pipe.transformer, args.lora_path, device, dtype)
+        lora_stats = _lora_weight_stats(lora_tr)
+        print(f"LoRA loaded: {lora_stats['lora_layers']} layers, "
+              f"lora_A mean|w|={lora_stats['lora_A_mean_abs']:.6f}, "
+              f"lora_B mean|w|={lora_stats['lora_B_mean_abs']:.6f}")
+        if lora_stats["lora_B_mean_abs"] < 1e-9:
+            print("WARNING: lora_B weights are near-zero — LoRA may not have trained or loaded correctly.")
 
         source_info: dict[str, object]
         if args.pair_dir is not None:
@@ -601,18 +648,46 @@ def main() -> None:
                 **prep_meta,
             }
 
-        out_img = one_step_sr(
-            transformer=lora_tr,
-            vae=pipe.vae,
-            lr_latent=zL,
-            tl=args.tl,
-            t_scale=t_scale,
-            vae_sf=vae_sf,
-            cap_feats_2d=cap_feats_2d,
+        sr_kwargs = dict(
+            vae=pipe.vae, lr_latent=zL, tl=args.tl,
+            t_scale=t_scale, vae_sf=vae_sf, cap_feats_2d=cap_feats_2d,
         )
+        out_img = one_step_sr(transformer=lora_tr, **sr_kwargs)
+
         out_path = args.output or _infer_default_output(args.pair_dir, args.input_image)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_img.save(out_path)
+
+        if args.compare_grid:
+            from zimagesr.training.transformer_utils import vae_decode_to_pixels
+            import torchvision.transforms.functional as TF
+
+            # Decode LR input
+            autocast_dt = torch.bfloat16 if torch.device(device).type == "cuda" else None
+            lr_pixels = vae_decode_to_pixels(pipe.vae, zL, vae_sf, autocast_dtype=autocast_dt)
+            lr_pil = TF.to_pil_image(lr_pixels[0].clamp(0, 1).float().cpu())
+
+            # Run base model (disable LoRA adapter)
+            lora_tr.disable_adapter_layers()
+            base_img = one_step_sr(transformer=lora_tr, **sr_kwargs)
+            lora_tr.enable_adapter_layers()
+
+            grid_imgs = [lr_pil, base_img, out_img]
+            grid_labels = ["LR (decoded)", "Base SR", "LoRA SR"]
+
+            # Include HR ground truth if available from pair dir
+            if args.pair_dir is not None:
+                hr_path = args.pair_dir / "x0.png"
+                if hr_path.exists():
+                    from PIL import Image
+                    grid_imgs.append(Image.open(hr_path).convert("RGB"))
+                    grid_labels.append("HR (ground truth)")
+
+            grid = _build_comparison_grid(grid_imgs, grid_labels)
+            grid_path = out_path.with_name(out_path.stem + "_grid.png")
+            grid.save(grid_path)
+            print(f"Comparison grid saved: {grid_path}")
+
         print(
             json.dumps(
                 {
@@ -624,6 +699,7 @@ def main() -> None:
                     "tl": args.tl,
                     "t_scale": t_scale,
                     "vae_sf": vae_sf,
+                    **lora_stats,
                     **source_info,
                 },
                 indent=2,

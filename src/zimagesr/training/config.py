@@ -1,7 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+
+
+def _default_save_dir() -> Path:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Path(f"./zimage_sr_lora_runs/ftd_run_{ts}")
 
 
 @dataclass
@@ -32,7 +38,7 @@ class TrainConfig:
     lora_dropout: float = 0.0
 
     # Checkpointing
-    save_dir: Path = Path("./zimage_sr_lora_runs/ftd_run")
+    save_dir: Path = field(default_factory=_default_save_dir)
     save_every: int = 150
     log_every: int = 20
 
