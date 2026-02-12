@@ -119,6 +119,7 @@ def load_lora_for_inference(
             "peft is required to load LoRA adapters. Install with: pip install peft"
         ) from exc
 
+    lora_path = Path(lora_path).resolve()
     model = PeftModel.from_pretrained(base_transformer, str(lora_path))
     model = model.to(device=device, dtype=dtype)
     model.eval()
