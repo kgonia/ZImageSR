@@ -197,6 +197,33 @@ pil_image = one_step_sr(
 pil_image.save("sr_output.png")
 ```
 
+CLI from existing pair directory (`zL.pt`):
+
+```bash
+zimagesr-data infer \
+  --model-id Tongyi-MAI/Z-Image-Turbo \
+  --lora-path ./zimage_sr_lora_runs/ftd_run/lora_final \
+  --pair-dir ./zimage_offline_pairs/pairs/000000 \
+  --output ./sr_from_pair.png
+```
+
+CLI from arbitrary input image:
+
+```bash
+zimagesr-data infer \
+  --model-id Tongyi-MAI/Z-Image-Turbo \
+  --lora-path ./zimage_sr_lora_runs/ftd_run/lora_final \
+  --input-image ./my_input.png \
+  --input-upscale 4.0 \
+  --fit-multiple 16 \
+  --output ./sr_from_image.png
+```
+
+Notes for `infer`:
+- In `--pair-dir` mode, the command loads `zL.pt` directly (paper notation).
+- In `--input-image` mode, the image is RGB-converted, optionally bicubic-upscaled (`--input-upscale`), then resized to dimensions divisible by `--fit-multiple` before VAE encoding.
+- Set `--input-upscale 1.0` if your input is already in the intended pre-upscaled space.
+
 ## 7. ZenML Minimal Pipelines
 
 Run gather pipeline:

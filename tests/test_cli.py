@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -213,3 +214,74 @@ def test_c11_parser_still_works_without_training_module(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Training config module is unavailable"):
         cli._train_config_from_args(train_args)
+
+
+def test_c12_build_parser_accepts_infer_pair_dir():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "infer",
+            "--lora-path",
+            "/tmp/lora",
+            "--pair-dir",
+            "/tmp/pairs/000001",
+        ]
+    )
+    assert args.command == "infer"
+    assert args.lora_path.as_posix() == "/tmp/lora"
+    assert args.pair_dir.as_posix() == "/tmp/pairs/000001"
+    assert args.input_image is None
+
+
+def test_c13_build_parser_accepts_infer_input_image():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "infer",
+            "--lora-path",
+            "/tmp/lora",
+            "--input-image",
+            "/tmp/in.png",
+            "--input-upscale",
+            "1.0",
+            "--fit-multiple",
+            "8",
+            "--output",
+            "/tmp/out.png",
+        ]
+    )
+    assert args.command == "infer"
+    assert args.input_image.as_posix() == "/tmp/in.png"
+    assert args.pair_dir is None
+    assert args.input_upscale == 1.0
+    assert args.fit_multiple == 8
+    assert args.output.as_posix() == "/tmp/out.png"
+
+
+def test_c14_infer_requires_exactly_one_source():
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["infer", "--lora-path", "/tmp/lora"])
+
+
+def test_c15_prepare_input_image_resizes_to_multiple(tmp_path):
+    from PIL import Image
+    import numpy as np
+
+    p = tmp_path / "in.png"
+    Image.fromarray(np.zeros((101, 203, 3), dtype=np.uint8), mode="RGB").save(p)
+
+    img, meta = cli._prepare_input_image(p, upscale=1.0, fit_multiple=16)
+
+    assert img.size == (208, 112)
+    assert meta["input_original_size"] == [203, 101]
+    assert meta["input_resized_by_upscale"] is False
+    assert meta["input_resized_by_multiple"] is True
+
+
+def test_c16_infer_default_output_paths():
+    pair_out = cli._infer_default_output(Path("/tmp/pairs/000001"), None)
+    assert pair_out.as_posix() == "/tmp/pairs/000001/sr.png"
+
+    img_out = cli._infer_default_output(None, Path("/tmp/in.png"))
+    assert img_out.as_posix() == "/tmp/in_sr.png"

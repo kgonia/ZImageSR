@@ -281,6 +281,64 @@ def _gather_config_from_args(args: argparse.Namespace) -> GatherConfig:
     )
 
 
+def _infer_default_output(pair_dir: Path | None, input_image: Path | None) -> Path:
+    if pair_dir is not None:
+        return pair_dir / "sr.png"
+    assert input_image is not None
+    return input_image.with_name(f"{input_image.stem}_sr.png")
+
+
+def _resize_to_multiple(pil_img, multiple: int):
+    """Resize image so width/height are divisible by *multiple*."""
+    if multiple <= 1:
+        return pil_img, False
+    w, h = pil_img.size
+    new_w = ((w + multiple - 1) // multiple) * multiple
+    new_h = ((h + multiple - 1) // multiple) * multiple
+    if new_w == w and new_h == h:
+        return pil_img, False
+    from PIL import Image
+
+    return pil_img.resize((new_w, new_h), resample=Image.BICUBIC), True
+
+
+def _prepare_input_image(path: Path, upscale: float, fit_multiple: int):
+    from PIL import Image
+
+    img = Image.open(path).convert("RGB")
+    original_size = [img.width, img.height]
+    changed_upscale = False
+    if upscale > 0 and abs(upscale - 1.0) > 1e-8:
+        w = max(1, int(round(img.width * upscale)))
+        h = max(1, int(round(img.height * upscale)))
+        img = img.resize((w, h), resample=Image.BICUBIC)
+        changed_upscale = True
+    img, changed_multiple = _resize_to_multiple(img, fit_multiple)
+    meta = {
+        "input_original_size": original_size,
+        "input_upscale": upscale,
+        "input_fit_multiple": fit_multiple,
+        "input_resized_by_upscale": changed_upscale,
+        "input_resized_by_multiple": changed_multiple,
+        "prepared_size": [img.width, img.height],
+    }
+    return img, meta
+
+
+def _load_zl_from_pair_dir(pair_dir: Path, device: str, dtype):
+    import torch
+
+    zl_path = pair_dir / "zL.pt"
+    if not zl_path.exists():
+        raise FileNotFoundError(f"Missing zL latent file: {zl_path}")
+    zL = torch.load(zl_path, map_location="cpu", weights_only=True)
+    if zL.ndim == 3:
+        zL = zL.unsqueeze(0)
+    if zL.ndim != 4:
+        raise ValueError(f"Expected zL to have 4 dims (1,C,H,W), got shape: {tuple(zL.shape)}")
+    return zL.to(device=device, dtype=dtype), zl_path
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zimagesr-data",
@@ -342,6 +400,45 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
+
+    infer_cmd = sub.add_parser(
+        "infer",
+        help="Run one-step SR inference from pair zL.pt or arbitrary input image.",
+    )
+    infer_cmd.add_argument("--model-id", default=_train_defaults()["model_id"])
+    infer_cmd.add_argument("--lora-path", type=Path, required=True, help="Path to LoRA adapter directory.")
+    infer_src = infer_cmd.add_mutually_exclusive_group(required=True)
+    infer_src.add_argument(
+        "--pair-dir",
+        type=Path,
+        help="Pair sample directory containing zL.pt (paper notation).",
+    )
+    infer_src.add_argument(
+        "--input-image",
+        type=Path,
+        help="Arbitrary input image path (RGB converted).",
+    )
+    infer_cmd.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Output SR image path. Defaults to pair-dir/sr.png or <input>_sr.png.",
+    )
+    infer_cmd.add_argument(
+        "--input-upscale",
+        type=float,
+        default=4.0,
+        help="Input image bicubic upscale factor before VAE encoding (image mode only).",
+    )
+    infer_cmd.add_argument(
+        "--fit-multiple",
+        type=int,
+        default=16,
+        help="Resize input image to dimensions divisible by this value (image mode only).",
+    )
+    infer_cmd.add_argument("--tl", type=float, default=_train_defaults()["tl"])
+    infer_cmd.add_argument("--device", default=None)
+    infer_cmd.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
 
     zenml_run = sub.add_parser(
         "zenml-run",
@@ -451,6 +548,87 @@ def main() -> None:
         pairs_dir = args.out_dir / "pairs"
         count = generate_zl_latents(pairs_dir, pipe, device, dtype, skip_existing=args.skip_existing)
         print(f"Created {count} zL.pt files")
+        return
+
+    if args.command == "infer":
+        try:
+            import torch
+            from diffusers import ZImageImg2ImgPipeline
+            from zimagesr.data.offline_pairs import vae_encode_latents_safe
+            from zimagesr.training.inference import one_step_sr
+            from zimagesr.training.lora import load_lora_for_inference
+            from zimagesr.training.transformer_utils import prepare_cap_feats
+        except ImportError as exc:
+            raise RuntimeError(
+                "infer requires `zimagesr.training` modules plus optional dep "
+                "(`peft`). Ensure repo has `src/zimagesr/training/`, then run: "
+                "uv sync && uv pip install -e '.[training]'"
+            ) from exc
+
+        device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        dtype_map = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+        dtype = dtype_map[args.dtype] if args.dtype else (torch.float32 if device == "cpu" else torch.bfloat16)
+
+        pipe = ZImageImg2ImgPipeline.from_pretrained(args.model_id, torch_dtype=dtype).to(device)
+        t_scale = float(getattr(pipe.transformer.config, "t_scale", 1.0))
+        vae_sf = float(getattr(pipe.vae.config, "scaling_factor", 1.0))
+
+        lora_tr = load_lora_for_inference(pipe.transformer, args.lora_path, device, dtype)
+        cap_feats_2d = prepare_cap_feats(pipe, device, dtype)
+
+        source_info: dict[str, object]
+        if args.pair_dir is not None:
+            zL, zl_path = _load_zl_from_pair_dir(args.pair_dir, device=device, dtype=dtype)
+            source_info = {
+                "source_mode": "pair_dir",
+                "pair_dir": str(args.pair_dir),
+                "zL_path": str(zl_path),
+                "prepared_size": None,
+            }
+        else:
+            assert args.input_image is not None
+            if not args.input_image.exists():
+                raise FileNotFoundError(f"Input image not found: {args.input_image}")
+            pil_img, prep_meta = _prepare_input_image(
+                args.input_image,
+                upscale=args.input_upscale,
+                fit_multiple=args.fit_multiple,
+            )
+            zL = vae_encode_latents_safe(pipe, pil_img, device=device, dtype=dtype)
+            source_info = {
+                "source_mode": "input_image",
+                "input_image": str(args.input_image),
+                **prep_meta,
+            }
+
+        out_img = one_step_sr(
+            transformer=lora_tr,
+            vae=pipe.vae,
+            lr_latent=zL,
+            tl=args.tl,
+            t_scale=t_scale,
+            vae_sf=vae_sf,
+            cap_feats_2d=cap_feats_2d,
+        )
+        out_path = args.output or _infer_default_output(args.pair_dir, args.input_image)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_img.save(out_path)
+        print(
+            json.dumps(
+                {
+                    "output_path": str(out_path),
+                    "model_id": args.model_id,
+                    "lora_path": str(args.lora_path),
+                    "device": device,
+                    "dtype": str(dtype),
+                    "tl": args.tl,
+                    "t_scale": t_scale,
+                    "vae_sf": vae_sf,
+                    **source_info,
+                },
+                indent=2,
+            )
+        )
         return
 
     if args.command == "zenml-run":
