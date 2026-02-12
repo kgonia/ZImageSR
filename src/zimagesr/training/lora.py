@@ -120,6 +120,13 @@ def load_lora_for_inference(
         ) from exc
 
     lora_path = Path(lora_path).resolve()
+    if not lora_path.is_dir():
+        raise FileNotFoundError(f"LoRA adapter directory not found: {lora_path}")
+    if not (lora_path / "adapter_config.json").is_file():
+        raise FileNotFoundError(
+            f"adapter_config.json not found in {lora_path}. "
+            f"Contents: {[p.name for p in lora_path.iterdir()]}"
+        )
     model = PeftModel.from_pretrained(base_transformer, str(lora_path))
     model = model.to(device=device, dtype=dtype)
     model.eval()

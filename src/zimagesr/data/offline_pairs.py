@@ -541,7 +541,17 @@ def generate_lr_pairs(
     n: int,
     start_index: int = 0,
     skip_existing: bool = True,
+    degradation: str = "bicubic",
+    seed: int | None = None,
 ) -> None:
+    if degradation == "realesrgan":
+        from zimagesr.data.degradation import realesrgan_degrade
+        degrade_fn = realesrgan_degrade
+    elif degradation == "bicubic":
+        degrade_fn = None  # use simple_x4_degrade below
+    else:
+        raise ValueError(f"Unknown degradation: {degradation!r}. Choose 'bicubic' or 'realesrgan'.")
+
     pairs_dir = ensure_pairs_dir(out_dir)
     loop = range(start_index, n)
     for i in tqdm(loop, desc="Generating LR pairs"):
@@ -556,7 +566,11 @@ def generate_lr_pairs(
             continue
 
         x0 = Image.open(x0_path).convert("RGB")
-        lr, lr_up = simple_x4_degrade(x0)
+        if degrade_fn is not None:
+            sample_seed = (seed + i) if seed is not None else None
+            lr, lr_up = degrade_fn(x0, seed=sample_seed)
+        else:
+            lr, lr_up = simple_x4_degrade(x0)
         lr.save(lr_path)
         lr_up.save(lr_up_path)
 

@@ -23,6 +23,14 @@ uv pip install -e ".[training]"
 
 This adds `peft` (LoRA), `lpips` (perceptual loss), and `wandb` (native Phase 2 logging).
 
+For RealESRGAN-style Phase 1 degradation, install:
+
+```bash
+uv pip install -e ".[degradation]"
+```
+
+This adds `basicsr` and `opencv-python`.
+
 ## 2. Generate Data (Phase 1)
 
 ```bash
@@ -45,6 +53,16 @@ Generate placeholder LR/LR-up files:
 
 ```bash
 zimagesr-data degrade --out-dir ./zimage_offline_pairs --n 1200
+```
+
+Generate LR/LR-up files with RealESRGAN second-order degradation:
+
+```bash
+zimagesr-data degrade \
+  --out-dir ./zimage_offline_pairs \
+  --n 1200 \
+  --degradation realesrgan \
+  --seed 1234
 ```
 
 ## 3. Debug and Inspect

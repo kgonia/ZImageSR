@@ -394,6 +394,18 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=GatherConfig.skip_existing,
     )
+    degrade.add_argument(
+        "--degradation",
+        choices=["bicubic", "realesrgan"],
+        default="bicubic",
+        help="Degradation pipeline: simple bicubic or RealESRGAN second-order.",
+    )
+    degrade.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Base seed for reproducible degradation (per-sample seed = seed + index).",
+    )
 
     inspect_cmd = sub.add_parser(
         "inspect",
@@ -518,6 +530,8 @@ def main() -> None:
             n=args.n,
             start_index=args.start_index,
             skip_existing=args.skip_existing,
+            degradation=args.degradation,
+            seed=args.seed,
         )
         return
 

@@ -24,6 +24,7 @@ zimagesr-zenml-bootstrap = "zimagesr.pipelines.zenml_bootstrap:main"
 
 [project.optional-dependencies]
 training = ["peft", "lpips", "wandb"]
+degradation = ["basicsr", "opencv-python"]
 
 [build-system]
 requires = ["hatchling"]

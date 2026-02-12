@@ -663,6 +663,38 @@ def test_u30_generate_lr_pairs(tmp_path):
     assert lr_path.stat().st_mtime_ns >= mtime_after
 
 
+def test_u34_generate_lr_pairs_realesrgan_delegation(tmp_path, monkeypatch):
+    """generate_lr_pairs(degradation='realesrgan') delegates to realesrgan_degrade."""
+    out_dir = tmp_path / "run"
+    s0 = out_dir / "pairs" / "000000"
+    s0.mkdir(parents=True)
+    Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8), mode="RGB").save(s0 / "x0.png")
+
+    calls = []
+
+    def _fake_degrade(pil_img, scale=4, seed=None):
+        calls.append({"size": pil_img.size, "seed": seed})
+        return op.simple_x4_degrade(pil_img)
+
+    import zimagesr.data.degradation as deg_mod
+    monkeypatch.setattr(deg_mod, "realesrgan_degrade", _fake_degrade)
+
+    op.generate_lr_pairs(
+        out_dir=out_dir, n=1, start_index=0,
+        skip_existing=False, degradation="realesrgan", seed=100,
+    )
+    assert len(calls) == 1
+    assert calls[0]["seed"] == 100  # seed + index(0)
+    assert (s0 / "lr.png").exists()
+    assert (s0 / "lr_up.png").exists()
+
+
+def test_u35_generate_lr_pairs_invalid_degradation(tmp_path):
+    out_dir = tmp_path / "run"
+    with pytest.raises(ValueError, match="Unknown degradation"):
+        op.generate_lr_pairs(out_dir=out_dir, n=1, degradation="invalid")
+
+
 def test_u31_inspect_local_pairs_structure(tmp_path):
     out_dir = tmp_path / "run"
     sample = out_dir / "pairs" / "000000"
