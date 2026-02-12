@@ -28,6 +28,8 @@ class TestAddTrainArgs:
         assert args.wandb_project == TrainConfig.wandb_project
         assert args.wandb_mode == TrainConfig.wandb_mode
         assert args.wandb_log_checkpoints == TrainConfig.wandb_log_checkpoints
+        assert args.wandb_log_checkpoint_grids == TrainConfig.wandb_log_checkpoint_grids
+        assert args.checkpoint_infer_grid == TrainConfig.checkpoint_infer_grid
         assert args.seed is None
 
     def test_parses_all_overrides(self, tmp_path):
@@ -66,6 +68,8 @@ class TestAddTrainArgs:
                 "--wandb-run-name", "run-z",
                 "--wandb-mode", "offline",
                 "--no-wandb-log-checkpoints",
+                "--no-wandb-log-checkpoint-grids",
+                "--checkpoint-infer-grid",
             ]
         )
 
@@ -94,6 +98,8 @@ class TestAddTrainArgs:
         assert args.wandb_run_name == "run-z"
         assert args.wandb_mode == "offline"
         assert args.wandb_log_checkpoints is False
+        assert args.wandb_log_checkpoint_grids is False
+        assert args.checkpoint_infer_grid is True
 
     def test_pairs_dir_required(self):
         parser = argparse.ArgumentParser()
@@ -120,6 +126,8 @@ class TestTrainConfigFromArgs:
         assert cfg.seed == 7
         assert cfg.batch_size == TrainConfig.batch_size  # default
         assert cfg.wandb_enabled is TrainConfig.wandb_enabled
+        assert cfg.wandb_log_checkpoint_grids is TrainConfig.wandb_log_checkpoint_grids
+        assert cfg.checkpoint_infer_grid is TrainConfig.checkpoint_infer_grid
 
 
 class TestBuildParserHasTrainAndGenerateZl:

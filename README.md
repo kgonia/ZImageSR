@@ -147,6 +147,8 @@ Key options:
 | `--wandb-project` | zimagesr | WandB project name |
 | `--wandb-mode` | online | `online` or `offline` |
 | `--wandb-log-checkpoints` | on | Log saved LoRA checkpoints as model artifacts |
+| `--checkpoint-infer-grid` / `--no-checkpoint-infer-grid` | off | Save checkpoint-time one-step inference grid (`inference_grid.png`) |
+| `--wandb-log-checkpoint-grids` / `--no-wandb-log-checkpoint-grids` | on | Log checkpoint inference grids as WandB images |
 
 Enable WandB example:
 
@@ -157,6 +159,19 @@ zimagesr-data train \
   --wandb-project zimagesr \
   --wandb-run-name ftd-run-001
 ```
+
+Checkpoint inference-grid example:
+
+```bash
+zimagesr-data train \
+  --pairs-dir ./zimage_offline_pairs/pairs \
+  --save-every 500 \
+  --checkpoint-infer-grid \
+  --wandb \
+  --wandb-log-checkpoint-grids
+```
+
+`--checkpoint-infer-grid` runs extra forward/decoder passes on one sample at each checkpoint step, so it adds runtime and some transient VRAM usage. Keep it off for max throughput.
 
 LoRA checkpoints are saved as PEFT adapters (`adapter_config.json` + safetensors).
 

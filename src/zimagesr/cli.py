@@ -63,6 +63,8 @@ def _train_defaults() -> dict[str, object]:
             "wandb_run_name": defaults_cfg.wandb_run_name,
             "wandb_mode": defaults_cfg.wandb_mode,
             "wandb_log_checkpoints": defaults_cfg.wandb_log_checkpoints,
+            "wandb_log_checkpoint_grids": defaults_cfg.wandb_log_checkpoint_grids,
+            "checkpoint_infer_grid": defaults_cfg.checkpoint_infer_grid,
         }
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return {
@@ -94,6 +96,8 @@ def _train_defaults() -> dict[str, object]:
         "wandb_run_name": None,
         "wandb_mode": "online",
         "wandb_log_checkpoints": True,
+        "wandb_log_checkpoint_grids": True,
+        "checkpoint_infer_grid": False,
     }
 
 
@@ -219,6 +223,18 @@ def _add_train_args(parser: argparse.ArgumentParser) -> None:
         default=defaults["wandb_log_checkpoints"],
         help="Log LoRA checkpoints as WandB model artifacts.",
     )
+    parser.add_argument(
+        "--wandb-log-checkpoint-grids",
+        action=argparse.BooleanOptionalAction,
+        default=defaults["wandb_log_checkpoint_grids"],
+        help="Log checkpoint-time inference grids as WandB images.",
+    )
+    parser.add_argument(
+        "--checkpoint-infer-grid",
+        action=argparse.BooleanOptionalAction,
+        default=defaults["checkpoint_infer_grid"],
+        help="Run one-step inference preview at checkpoint steps and save comparison grids.",
+    )
 
 
 def _train_config_from_args(args: argparse.Namespace):
@@ -256,6 +272,8 @@ def _train_config_from_args(args: argparse.Namespace):
         wandb_run_name=args.wandb_run_name,
         wandb_mode=args.wandb_mode,
         wandb_log_checkpoints=args.wandb_log_checkpoints,
+        wandb_log_checkpoint_grids=args.wandb_log_checkpoint_grids,
+        checkpoint_infer_grid=args.checkpoint_infer_grid,
     )
 
 

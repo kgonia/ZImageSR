@@ -58,3 +58,7 @@ class TrainConfig:
     wandb_run_name: str | None = None
     wandb_mode: str = "online"  # online/offline
     wandb_log_checkpoints: bool = True
+    wandb_log_checkpoint_grids: bool = True
+
+    # Checkpoint-time inference preview
+    checkpoint_infer_grid: bool = False

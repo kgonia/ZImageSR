@@ -89,6 +89,8 @@ class TestTrainConfig:
         assert cfg.save_dir.name.startswith("ftd_run_")
         assert cfg.wandb_enabled is False
         assert cfg.wandb_project == "zimagesr"
+        assert cfg.wandb_log_checkpoint_grids is True
+        assert cfg.checkpoint_infer_grid is False
 
     def test_custom_values(self, tmp_path):
         cfg = TrainConfig(

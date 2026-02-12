@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from zimagesr.training.config import TrainConfig
 from zimagesr.training.dataset import FTDPairDataset, ftd_collate
+from zimagesr.training.inference import one_step_sr
 from zimagesr.training.lora import apply_lora, save_lora
 from zimagesr.training.losses import TVLPIPSLoss, compute_adl_loss
 from zimagesr.training.transformer_utils import (
@@ -46,6 +47,90 @@ def _wandb_config_dict(config: TrainConfig) -> dict[str, Any]:
         if isinstance(value, Path):
             cfg[key] = str(value)
     return cfg
+
+
+def _build_comparison_grid(images: list[Any], labels: list[str]) -> Any:
+    """Build a labeled side-by-side image grid from PIL images."""
+    from PIL import Image, ImageDraw
+
+    width, height = images[0].size
+    canvas = Image.new("RGB", (width * len(images), height + 24), "white")
+    draw = ImageDraw.Draw(canvas)
+    for idx, (img, label) in enumerate(zip(images, labels)):
+        canvas.paste(img.resize((width, height), resample=Image.BICUBIC), (idx * width, 0))
+        draw.text((idx * width + 4, height + 4), label, fill="black")
+    return canvas
+
+
+def _save_checkpoint_inference_grid(
+    *,
+    transformer: torch.nn.Module,
+    vae: torch.nn.Module,
+    zL: torch.Tensor,
+    x0_pixels: torch.Tensor | None,
+    tl: float,
+    t_scale: float,
+    vae_sf: float,
+    cap_feats_2d: torch.Tensor,
+    out_path: Path,
+) -> Path:
+    """Save an LR|Base SR|LoRA SR( + HR) comparison grid for checkpoint diagnostics."""
+    import torchvision.transforms.functional as TF
+
+    device = zL.device
+    autocast_dt = torch.bfloat16 if device.type == "cuda" else None
+
+    was_training = transformer.training
+    transformer.eval()
+    try:
+        with torch.no_grad():
+            lr_pixels = vae_decode_to_pixels(vae, zL, vae_sf, autocast_dtype=autocast_dt)
+            lr_pil = TF.to_pil_image(lr_pixels[0].clamp(0, 1).float().cpu())
+
+            lora_img = one_step_sr(
+                transformer=transformer,
+                vae=vae,
+                lr_latent=zL,
+                tl=tl,
+                t_scale=t_scale,
+                vae_sf=vae_sf,
+                cap_feats_2d=cap_feats_2d,
+            )
+
+            base_img = None
+            if hasattr(transformer, "disable_adapter_layers") and hasattr(transformer, "enable_adapter_layers"):
+                transformer.disable_adapter_layers()
+                try:
+                    base_img = one_step_sr(
+                        transformer=transformer,
+                        vae=vae,
+                        lr_latent=zL,
+                        tl=tl,
+                        t_scale=t_scale,
+                        vae_sf=vae_sf,
+                        cap_feats_2d=cap_feats_2d,
+                    )
+                finally:
+                    transformer.enable_adapter_layers()
+
+            images = [lr_pil]
+            labels = ["LR (decoded)"]
+            if base_img is not None:
+                images.append(base_img)
+                labels.append("Base SR")
+            images.append(lora_img)
+            labels.append("LoRA SR")
+            if x0_pixels is not None:
+                hr_pil = TF.to_pil_image(x0_pixels[0].clamp(0, 1).float().cpu())
+                images.append(hr_pil)
+                labels.append("HR (ground truth)")
+            grid = _build_comparison_grid(images, labels)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            grid.save(out_path)
+    finally:
+        if was_training:
+            transformer.train()
+    return out_path
 
 
 def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
@@ -335,6 +420,27 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                     save_lora(pipe.transformer, sp, accelerator=accelerator)
                     ok = (sp / "adapter_config.json").exists()
                     logger.info("Step %d saved: %s (%s)", global_step, sp, "OK" if ok else "MISSING adapter_config!")
+                    if config.checkpoint_infer_grid and accelerator.is_main_process:
+                        try:
+                            x0_pixels = batch.get("x0_pixels")
+                            if x0_pixels is not None:
+                                x0_pixels = x0_pixels[:1].to(device=device, dtype=dtype)
+                            grid_path = _save_checkpoint_inference_grid(
+                                transformer=pipe.transformer,
+                                vae=pipe.vae,
+                                zL=zL[:1],
+                                x0_pixels=x0_pixels,
+                                tl=TL,
+                                t_scale=t_scale,
+                                vae_sf=vae_sf,
+                                cap_feats_2d=cap_feats_2d,
+                                out_path=sp / "inference_grid.png",
+                            )
+                            logger.info("Saved checkpoint inference grid: %s", grid_path)
+                            if wandb_run is not None and wandb is not None and config.wandb_log_checkpoint_grids:
+                                wandb_run.log({"train/checkpoint_grid": wandb.Image(str(grid_path))}, step=global_step)
+                        except Exception:
+                            logger.exception("Failed to save checkpoint inference grid at step %d", global_step)
                     if wandb_run is not None and wandb is not None and config.wandb_log_checkpoints and ok:
                         artifact = wandb.Artifact(
                             name=f"zimagesr-lora-{wandb_run.id}-step-{global_step}",
