@@ -286,19 +286,20 @@ def _gather_config_from_args(args: argparse.Namespace) -> GatherConfig:
 
 def _lora_weight_stats(model) -> dict[str, float]:
     """Return diagnostic stats for loaded LoRA adapter weights."""
-    a_abs, b_abs, count = 0.0, 0.0, 0
+    a_abs, b_abs, a_count, b_count = 0.0, 0.0, 0, 0
     for name, param in model.named_parameters():
         if "lora_A" in name:
             a_abs += param.detach().abs().mean().item()
-            count += 1
+            a_count += 1
         elif "lora_B" in name:
             b_abs += param.detach().abs().mean().item()
-    if count == 0:
+            b_count += 1
+    if a_count == 0:
         return {"lora_layers": 0, "lora_A_mean_abs": 0.0, "lora_B_mean_abs": 0.0}
     return {
-        "lora_layers": count,
-        "lora_A_mean_abs": round(a_abs / count, 8),
-        "lora_B_mean_abs": round(b_abs / count, 8),
+        "lora_layers": a_count,
+        "lora_A_mean_abs": round(a_abs / a_count, 8),
+        "lora_B_mean_abs": round(b_abs / b_count, 8) if b_count else 0.0,
     }
 
 
