@@ -165,7 +165,7 @@ LoRA checkpoints are saved as PEFT adapters (`adapter_config.json` + safetensors
 Each sample directory under `pairs/` should contain:
 
 ```
-pairs/0000/
+pairs/000000/
   eps.pt        # noise tensor (1, 16, 128, 128)
   z0.pt         # clean latent  (1, 16, 128, 128)
   zL.pt         # degraded latent (1, 16, 128, 128)
@@ -201,7 +201,7 @@ lora_tr = load_lora_for_inference(base_tr, "path/to/lora_final", device, dtype)
 cap_feats = prepare_cap_feats(pipe, device, dtype)  # (1, 2560)
 
 # Load a degraded latent
-zL = torch.load("path/to/pairs/0000/zL.pt", weights_only=True).to(device=device, dtype=dtype)
+zL = torch.load("path/to/pairs/000000/zL.pt", weights_only=True).to(device=device, dtype=dtype)
 
 # Run one-step SR
 pil_image = one_step_sr(
@@ -242,6 +242,7 @@ Notes for `infer`:
 - In `--pair-dir` mode, the command loads `zL.pt` directly (paper notation).
 - In `--input-image` mode, the image is RGB-converted, optionally bicubic-upscaled (`--input-upscale`), then resized to dimensions divisible by `--fit-multiple` before VAE encoding.
 - Set `--input-upscale 1.0` if your input is already in the intended pre-upscaled space.
+- Add `--compare-grid` to save `<output>_grid.png` with `LR (decoded) | Base SR | LoRA SR` and optional `HR (ground truth)` if `x0.png` exists in `--pair-dir`.
 
 ## 7. ZenML Minimal Pipelines
 
