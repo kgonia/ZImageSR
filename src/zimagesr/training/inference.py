@@ -15,6 +15,7 @@ def one_step_sr(
     t_scale: float,
     vae_sf: float,
     cap_feats_2d: torch.Tensor,
+    sr_scale: float = 1.0,
 ) -> "Image.Image":  # noqa: F821  — PIL lazy import
     """Run one-step super-resolution inference.
 
@@ -26,6 +27,7 @@ def one_step_sr(
         t_scale: Transformer's ``t_scale`` config value (usually 1000.0).
         vae_sf: VAE ``scaling_factor``.
         cap_feats_2d: ``(seq_len, cap_dim)`` null caption features.
+        sr_scale: Inference correction scale for ``v(TL)``.
 
     Returns:
         PIL Image of the super-resolved output.
@@ -45,7 +47,7 @@ def one_step_sr(
         timestep=TL_t,
         cap_feats_2d=cap_feats_2d,
     )
-    z0_hat = lr_latent - v * TL_bc
+    z0_hat = lr_latent - (sr_scale * v) * TL_bc
 
     autocast_dt = torch.bfloat16 if device.type == "cuda" else None
     pixels = vae_decode_to_pixels(vae, z0_hat, vae_sf, autocast_dtype=autocast_dt)

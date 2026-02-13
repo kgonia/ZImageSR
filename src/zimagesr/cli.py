@@ -65,6 +65,12 @@ def _train_defaults() -> dict[str, object]:
             "wandb_log_checkpoints": defaults_cfg.wandb_log_checkpoints,
             "wandb_log_checkpoint_grids": defaults_cfg.wandb_log_checkpoint_grids,
             "checkpoint_infer_grid": defaults_cfg.checkpoint_infer_grid,
+            "checkpoint_eval_ids": defaults_cfg.checkpoint_eval_ids,
+            "checkpoint_eval_images_dir": defaults_cfg.checkpoint_eval_images_dir,
+            "checkpoint_eval_images_limit": defaults_cfg.checkpoint_eval_images_limit,
+            "checkpoint_eval_input_upscale": defaults_cfg.checkpoint_eval_input_upscale,
+            "checkpoint_eval_fit_multiple": defaults_cfg.checkpoint_eval_fit_multiple,
+            "resume_from": defaults_cfg.resume_from,
         }
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return {
@@ -98,6 +104,12 @@ def _train_defaults() -> dict[str, object]:
         "wandb_log_checkpoints": True,
         "wandb_log_checkpoint_grids": True,
         "checkpoint_infer_grid": False,
+        "checkpoint_eval_ids": (),
+        "checkpoint_eval_images_dir": None,
+        "checkpoint_eval_images_limit": 4,
+        "checkpoint_eval_input_upscale": 4.0,
+        "checkpoint_eval_fit_multiple": 16,
+        "resume_from": None,
     }
 
 
@@ -235,6 +247,47 @@ def _add_train_args(parser: argparse.ArgumentParser) -> None:
         default=defaults["checkpoint_infer_grid"],
         help="Run one-step inference preview at checkpoint steps and save comparison grids.",
     )
+    parser.add_argument(
+        "--checkpoint-eval-ids",
+        default=",".join(defaults["checkpoint_eval_ids"]),
+        help="Comma-separated fixed pair IDs for checkpoint grids (e.g. 000000,000123).",
+    )
+    parser.add_argument(
+        "--checkpoint-eval-images-dir",
+        type=Path,
+        default=defaults["checkpoint_eval_images_dir"],
+        help="Folder of arbitrary images used for checkpoint-time eval grids.",
+    )
+    parser.add_argument(
+        "--checkpoint-eval-images-limit",
+        type=int,
+        default=defaults["checkpoint_eval_images_limit"],
+        help="Maximum number of images loaded from --checkpoint-eval-images-dir.",
+    )
+    parser.add_argument(
+        "--checkpoint-eval-input-upscale",
+        type=float,
+        default=defaults["checkpoint_eval_input_upscale"],
+        help="Bicubic upscale factor before VAE encode for checkpoint eval images.",
+    )
+    parser.add_argument(
+        "--checkpoint-eval-fit-multiple",
+        type=int,
+        default=defaults["checkpoint_eval_fit_multiple"],
+        help="Resize checkpoint eval images to dimensions divisible by this value before VAE encode.",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        default=defaults["resume_from"],
+        help="Resume training from a checkpoint directory (auto-detects full vs weights-only).",
+    )
+
+
+def _parse_csv_values(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    return tuple(v.strip() for v in value.split(",") if v.strip())
 
 
 def _train_config_from_args(args: argparse.Namespace):
@@ -274,6 +327,12 @@ def _train_config_from_args(args: argparse.Namespace):
         wandb_log_checkpoints=args.wandb_log_checkpoints,
         wandb_log_checkpoint_grids=args.wandb_log_checkpoint_grids,
         checkpoint_infer_grid=args.checkpoint_infer_grid,
+        checkpoint_eval_ids=_parse_csv_values(args.checkpoint_eval_ids),
+        checkpoint_eval_images_dir=args.checkpoint_eval_images_dir,
+        checkpoint_eval_images_limit=args.checkpoint_eval_images_limit,
+        checkpoint_eval_input_upscale=args.checkpoint_eval_input_upscale,
+        checkpoint_eval_fit_multiple=args.checkpoint_eval_fit_multiple,
+        resume_from=args.resume_from,
     )
 
 
@@ -503,6 +562,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resize input image to dimensions divisible by this value (image mode only).",
     )
     infer_cmd.add_argument("--tl", type=float, default=_train_defaults()["tl"])
+    infer_cmd.add_argument(
+        "--sr-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for one-step SR correction: z0_hat = zL - sr_scale * v(TL) * TL.",
+    )
     infer_cmd.add_argument("--device", default=None)
     infer_cmd.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
     infer_cmd.add_argument(
@@ -683,7 +748,7 @@ def main() -> None:
 
         sr_kwargs = dict(
             vae=pipe.vae, lr_latent=zL, tl=args.tl,
-            t_scale=t_scale, vae_sf=vae_sf, cap_feats_2d=cap_feats_2d,
+            t_scale=t_scale, vae_sf=vae_sf, cap_feats_2d=cap_feats_2d, sr_scale=args.sr_scale,
         )
         out_img = one_step_sr(transformer=lora_tr, **sr_kwargs)
 
@@ -730,6 +795,7 @@ def main() -> None:
                     "device": device,
                     "dtype": str(dtype),
                     "tl": args.tl,
+                    "sr_scale": args.sr_scale,
                     "t_scale": t_scale,
                     "vae_sf": vae_sf,
                     **lora_stats,

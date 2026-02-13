@@ -30,7 +30,13 @@ class TestAddTrainArgs:
         assert args.wandb_log_checkpoints == TrainConfig.wandb_log_checkpoints
         assert args.wandb_log_checkpoint_grids == TrainConfig.wandb_log_checkpoint_grids
         assert args.checkpoint_infer_grid == TrainConfig.checkpoint_infer_grid
+        assert args.checkpoint_eval_ids == ""
+        assert args.checkpoint_eval_images_dir is None
+        assert args.checkpoint_eval_images_limit == TrainConfig.checkpoint_eval_images_limit
+        assert args.checkpoint_eval_input_upscale == TrainConfig.checkpoint_eval_input_upscale
+        assert args.checkpoint_eval_fit_multiple == TrainConfig.checkpoint_eval_fit_multiple
         assert args.seed is None
+        assert args.resume_from is None
 
     def test_parses_all_overrides(self, tmp_path):
         parser = argparse.ArgumentParser()
@@ -70,6 +76,11 @@ class TestAddTrainArgs:
                 "--no-wandb-log-checkpoints",
                 "--no-wandb-log-checkpoint-grids",
                 "--checkpoint-infer-grid",
+                "--checkpoint-eval-ids", "000000,7,custom_id",
+                "--checkpoint-eval-images-dir", str(tmp_path / "eval_images"),
+                "--checkpoint-eval-images-limit", "3",
+                "--checkpoint-eval-input-upscale", "2.0",
+                "--checkpoint-eval-fit-multiple", "8",
             ]
         )
 
@@ -100,6 +111,20 @@ class TestAddTrainArgs:
         assert args.wandb_log_checkpoints is False
         assert args.wandb_log_checkpoint_grids is False
         assert args.checkpoint_infer_grid is True
+        assert args.checkpoint_eval_ids == "000000,7,custom_id"
+        assert args.checkpoint_eval_images_dir.as_posix() == (tmp_path / "eval_images").as_posix()
+        assert args.checkpoint_eval_images_limit == 3
+        assert args.checkpoint_eval_input_upscale == 2.0
+        assert args.checkpoint_eval_fit_multiple == 8
+
+    def test_resume_from_parses_path(self, tmp_path):
+        parser = argparse.ArgumentParser()
+        cli._add_train_args(parser)
+        ckpt = tmp_path / "lora_step_50"
+        args = parser.parse_args(["--pairs-dir", str(tmp_path), "--resume-from", str(ckpt)])
+        from pathlib import Path
+
+        assert args.resume_from == Path(str(ckpt))
 
     def test_pairs_dir_required(self):
         parser = argparse.ArgumentParser()
@@ -128,6 +153,45 @@ class TestTrainConfigFromArgs:
         assert cfg.wandb_enabled is TrainConfig.wandb_enabled
         assert cfg.wandb_log_checkpoint_grids is TrainConfig.wandb_log_checkpoint_grids
         assert cfg.checkpoint_infer_grid is TrainConfig.checkpoint_infer_grid
+        assert cfg.checkpoint_eval_ids == ()
+        assert cfg.checkpoint_eval_images_dir is None
+        assert cfg.checkpoint_eval_images_limit == TrainConfig.checkpoint_eval_images_limit
+        assert cfg.checkpoint_eval_input_upscale == TrainConfig.checkpoint_eval_input_upscale
+        assert cfg.checkpoint_eval_fit_multiple == TrainConfig.checkpoint_eval_fit_multiple
+        assert cfg.resume_from is None
+
+    def test_checkpoint_eval_values_round_trip(self, tmp_path):
+        parser = argparse.ArgumentParser()
+        cli._add_train_args(parser)
+        images_dir = tmp_path / "imgs"
+        args = parser.parse_args(
+            [
+                "--pairs-dir", str(tmp_path),
+                "--checkpoint-eval-ids", "000000, 42 ,custom",
+                "--checkpoint-eval-images-dir", str(images_dir),
+                "--checkpoint-eval-images-limit", "5",
+                "--checkpoint-eval-input-upscale", "1.5",
+                "--checkpoint-eval-fit-multiple", "32",
+            ]
+        )
+        cfg = cli._train_config_from_args(args)
+        assert cfg.checkpoint_eval_ids == ("000000", "42", "custom")
+        assert cfg.checkpoint_eval_images_dir == images_dir
+        assert cfg.checkpoint_eval_images_limit == 5
+        assert cfg.checkpoint_eval_input_upscale == 1.5
+        assert cfg.checkpoint_eval_fit_multiple == 32
+
+    def test_resume_from_round_trip(self, tmp_path):
+        parser = argparse.ArgumentParser()
+        cli._add_train_args(parser)
+        ckpt = tmp_path / "lora_step_50"
+        args = parser.parse_args(
+            ["--pairs-dir", str(tmp_path), "--resume-from", str(ckpt)]
+        )
+        cfg = cli._train_config_from_args(args)
+        from pathlib import Path
+
+        assert cfg.resume_from == Path(str(ckpt))
 
 
 class TestBuildParserHasTrainAndGenerateZl:

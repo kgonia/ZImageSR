@@ -149,6 +149,12 @@ Key options:
 | `--wandb-log-checkpoints` | on | Log saved LoRA checkpoints as model artifacts |
 | `--checkpoint-infer-grid` / `--no-checkpoint-infer-grid` | off | Save checkpoint-time one-step inference grid (`inference_grid.png`) |
 | `--wandb-log-checkpoint-grids` / `--no-wandb-log-checkpoint-grids` | on | Log checkpoint inference grids as WandB images |
+| `--checkpoint-eval-ids` | empty | Fixed pair IDs used for checkpoint grids (instead of random batch sample) |
+| `--checkpoint-eval-images-dir` | none | Folder of arbitrary images to include in checkpoint grids |
+| `--checkpoint-eval-images-limit` | 4 | Max number of images loaded from `--checkpoint-eval-images-dir` |
+| `--checkpoint-eval-input-upscale` | 4.0 | Bicubic upscale factor before VAE encode for eval images |
+| `--checkpoint-eval-fit-multiple` | 16 | Resize eval images to a multiple before VAE encode |
+| `--resume-from` | none | Resume from a checkpoint directory (auto-detects mode) |
 
 Enable WandB example:
 
@@ -167,13 +173,63 @@ zimagesr-data train \
   --pairs-dir ./zimage_offline_pairs/pairs \
   --save-every 500 \
   --checkpoint-infer-grid \
+  --checkpoint-eval-ids 000000,000123,000777 \
+  --checkpoint-eval-images-dir ./eval_images \
   --wandb \
   --wandb-log-checkpoint-grids
 ```
 
-`--checkpoint-infer-grid` runs extra forward/decoder passes on one sample at each checkpoint step, so it adds runtime and some transient VRAM usage. Keep it off for max throughput.
+`--checkpoint-infer-grid` runs extra forward/decoder passes at each checkpoint step, so it adds runtime and some transient VRAM usage. Keep it off for max throughput.
 
-LoRA checkpoints are saved as PEFT adapters (`adapter_config.json` + safetensors).
+### Resume training
+
+Checkpoints now include full training state (`training_state.json` + `accelerator_state/`)
+alongside the LoRA adapter weights. If a run is interrupted, resume with `--resume-from`:
+
+```bash
+# Full resume — restores optimizer state, RNG, and step counter
+zimagesr-data train \
+  --pairs-dir ./zimage_offline_pairs/pairs \
+  --resume-from ./zimage_sr_lora_runs/ftd_run/lora_step_300 \
+  --save-dir ./zimage_sr_lora_runs/ftd_run \
+  --max-steps 750
+```
+
+Two modes are auto-detected from the checkpoint directory contents:
+
+| Mode | Detected when | Behaviour |
+|---|---|---|
+| **Full** | `training_state.json` + `accelerator_state/` present | Seamless resume: optimizer momentum, RNG, and step counter restored |
+| **Weights-only** | Only `adapter_config.json` present | Warm restart: LoRA weights loaded, fresh optimizer at step 0 |
+
+For **full** resume, the trainer now validates key structural settings
+(`model_id`, LoRA rank/alpha/dropout, and selected training structure flags)
+against the checkpoint config before loading state, and raises a clear error on mismatch.
+
+Weights-only mode is useful for resuming from older checkpoints (before this feature)
+or from checkpoints saved by other tools:
+
+```bash
+# Weights-only resume — loads LoRA weights, starts fresh optimizer at step 0
+zimagesr-data train \
+  --pairs-dir ./zimage_offline_pairs/pairs \
+  --resume-from ./old_checkpoint_without_state \
+  --max-steps 750
+```
+
+### Checkpoint directory structure
+
+```
+lora_step_300/
+    adapter_config.json          # LoRA config (PEFT)
+    adapter_model.safetensors    # LoRA weights
+    inference_grid_*.png         # (optional) checkpoint inference previews (one per eval sample)
+    training_state.json          # step counter + serialized config
+    accelerator_state/           # optimizer state, RNG, scheduler
+```
+
+LoRA checkpoints are saved as PEFT adapters and remain directly usable for inference
+even without the training state files.
 
 ### Dataset layout
 
@@ -224,6 +280,7 @@ pil_image = one_step_sr(
     vae=pipe.vae,
     lr_latent=zL,
     tl=0.25,
+    sr_scale=1.0,
     t_scale=1000.0,
     vae_sf=0.3611,
     cap_feats_2d=cap_feats,
@@ -238,6 +295,7 @@ zimagesr-data infer \
   --model-id Tongyi-MAI/Z-Image-Turbo \
   --lora-path ./zimage_sr_lora_runs/ftd_run/lora_final \
   --pair-dir ./zimage_offline_pairs/pairs/000000 \
+  --sr-scale 1.0 \
   --output ./sr_from_pair.png
 ```
 
@@ -250,6 +308,7 @@ zimagesr-data infer \
   --input-image ./my_input.png \
   --input-upscale 4.0 \
   --fit-multiple 16 \
+  --sr-scale 0.9 \
   --output ./sr_from_image.png
 ```
 
@@ -257,6 +316,7 @@ Notes for `infer`:
 - In `--pair-dir` mode, the command loads `zL.pt` directly (paper notation).
 - In `--input-image` mode, the image is RGB-converted, optionally bicubic-upscaled (`--input-upscale`), then resized to dimensions divisible by `--fit-multiple` before VAE encoding.
 - Set `--input-upscale 1.0` if your input is already in the intended pre-upscaled space.
+- `--sr-scale` controls correction strength at inference (`z0_hat = zL - sr_scale * v(TL) * TL`).
 - Add `--compare-grid` to save `<output>_grid.png` with `LR (decoded) | Base SR | LoRA SR` and optional `HR (ground truth)` if `x0.png` exists in `--pair-dir`.
 
 ## 7. ZenML Minimal Pipelines

@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+import json as _json
+
 from zimagesr.training.config import TrainConfig
 from zimagesr.training.dataset import FTDPairDataset, ftd_collate
 from zimagesr.training.inference import one_step_sr
@@ -38,6 +40,135 @@ def _resolve_dtype(dtype_str: str | None, device: str) -> torch.dtype:
     if device.startswith("cpu"):
         return torch.float32
     return torch.bfloat16
+
+
+class ResumeMode:
+    NONE = "none"
+    FULL = "full"
+    WEIGHTS_ONLY = "weights_only"
+
+
+RESUME_COMPAT_KEYS = (
+    "model_id",
+    "lora_rank",
+    "lora_alpha",
+    "lora_dropout",
+    "mixed_precision",
+    "gradient_checkpointing",
+    "disable_vae_force_upcast",
+)
+
+
+def _detect_resume_mode(resume_path: Path | None) -> str:
+    """Auto-detect resume mode from checkpoint contents.
+
+    Returns:
+        ``ResumeMode.NONE`` if *resume_path* is ``None``.
+        ``ResumeMode.FULL`` if the directory contains both
+        ``training_state.json`` and ``accelerator_state/``.
+        ``ResumeMode.WEIGHTS_ONLY`` if the directory contains
+        ``adapter_config.json`` but not the full training state.
+
+    Raises:
+        FileNotFoundError: If *resume_path* doesn't exist or lacks
+            recognisable checkpoint files.
+    """
+    if resume_path is None:
+        return ResumeMode.NONE
+
+    resume_path = Path(resume_path)
+    if not resume_path.is_dir():
+        raise FileNotFoundError(f"Resume checkpoint directory not found: {resume_path}")
+
+    has_training_state = (resume_path / "training_state.json").is_file()
+    has_accelerator_state = (resume_path / "accelerator_state").is_dir()
+    has_adapter_config = (resume_path / "adapter_config.json").is_file()
+
+    if has_training_state and has_accelerator_state:
+        return ResumeMode.FULL
+    if has_adapter_config:
+        return ResumeMode.WEIGHTS_ONLY
+
+    raise FileNotFoundError(
+        f"Checkpoint directory {resume_path} contains neither "
+        f"training_state.json + accelerator_state/ (full resume) nor "
+        f"adapter_config.json (weights-only resume). "
+        f"Contents: {sorted(p.name for p in resume_path.iterdir())}"
+    )
+
+
+def _count_trainable_params(model: torch.nn.Module) -> int:
+    """Return total number of trainable parameters in *model*."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def _load_weights_only_resume_model(
+    transformer: torch.nn.Module,
+    resume_path: Path,
+) -> torch.nn.Module:
+    """Load LoRA adapter for training continuation from weights-only checkpoint."""
+    from peft import PeftModel
+
+    model = PeftModel.from_pretrained(
+        transformer,
+        str(resume_path),
+        is_trainable=True,
+    )
+    if _count_trainable_params(model) == 0:
+        raise RuntimeError(
+            "Loaded weights-only checkpoint has no trainable parameters. "
+            "Expected trainable LoRA adapter weights for resumed training."
+        )
+    return model
+
+
+def _validate_full_resume_config(
+    config: TrainConfig,
+    state_json: dict[str, Any],
+) -> None:
+    """Validate config compatibility before full-state resume."""
+    saved_cfg = state_json.get("config")
+    if not isinstance(saved_cfg, dict):
+        logger.warning(
+            "Full resume checkpoint is missing serialized config in training_state.json; "
+            "skipping compatibility checks."
+        )
+        return
+
+    current_cfg = _wandb_config_dict(config)
+    mismatches: list[tuple[str, Any, Any]] = []
+    for key in RESUME_COMPAT_KEYS:
+        if saved_cfg.get(key) != current_cfg.get(key):
+            mismatches.append((key, saved_cfg.get(key), current_cfg.get(key)))
+
+    if mismatches:
+        details = "; ".join(
+            f"{key}: checkpoint={saved!r}, current={current!r}"
+            for key, saved, current in mismatches
+        )
+        raise ValueError(
+            "Incompatible full-resume configuration. "
+            "Use the same model/LoRA/training-structure settings as the checkpoint. "
+            f"Mismatches: {details}"
+        )
+
+
+def _save_training_state(
+    checkpoint_dir: Path,
+    accelerator: Any,
+    global_step: int,
+    config: TrainConfig,
+) -> None:
+    """Save accelerator state and training metadata to *checkpoint_dir*."""
+    accelerator.save_state(str(checkpoint_dir / "accelerator_state"))
+    if accelerator.is_main_process:
+        state = {
+            "global_step": global_step,
+            "config": _wandb_config_dict(config),
+        }
+        (checkpoint_dir / "training_state.json").write_text(
+            _json.dumps(state, indent=2) + "\n", encoding="utf-8"
+        )
 
 
 def _wandb_config_dict(config: TrainConfig) -> dict[str, Any]:
@@ -133,6 +264,127 @@ def _save_checkpoint_inference_grid(
     return out_path
 
 
+def _sanitize_eval_name(name: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in name)
+    safe = safe.strip("_")
+    return safe or "sample"
+
+
+def _resize_to_multiple(pil_img: Any, multiple: int) -> Any:
+    if multiple <= 1:
+        return pil_img
+    width, height = pil_img.size
+    new_w = ((width + multiple - 1) // multiple) * multiple
+    new_h = ((height + multiple - 1) // multiple) * multiple
+    if new_w == width and new_h == height:
+        return pil_img
+    from PIL import Image
+
+    return pil_img.resize((new_w, new_h), resample=Image.BICUBIC)
+
+
+def _prepare_eval_input_image(path: Path, upscale: float, fit_multiple: int) -> Any:
+    from PIL import Image
+
+    img = Image.open(path).convert("RGB")
+    if upscale > 0 and abs(upscale - 1.0) > 1e-8:
+        w = max(1, int(round(img.width * upscale)))
+        h = max(1, int(round(img.height * upscale)))
+        img = img.resize((w, h), resample=Image.BICUBIC)
+    return _resize_to_multiple(img, fit_multiple)
+
+
+def _load_png_tensor(path: Path) -> torch.Tensor:
+    import numpy as np
+    from PIL import Image
+
+    arr = np.array(Image.open(path).convert("RGB")).astype("float32") / 255.0
+    return torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
+
+
+def _resolve_pair_id_dir(pairs_dir: Path, sample_id: str) -> Path | None:
+    sid = sample_id.strip()
+    if not sid:
+        return None
+    candidates = [pairs_dir / sid]
+    if sid.isdigit():
+        candidates.insert(0, pairs_dir / f"{int(sid):06d}")
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+def _gather_checkpoint_eval_samples(
+    *,
+    config: TrainConfig,
+    pipe: Any,
+    device: torch.device,
+    dtype: torch.dtype,
+    default_zL: torch.Tensor,
+    default_x0_pixels: torch.Tensor | None,
+) -> list[tuple[str, torch.Tensor, torch.Tensor | None]]:
+    """Collect zL/x0 sample tuples for checkpoint-time grid rendering."""
+    samples: list[tuple[str, torch.Tensor, torch.Tensor | None]] = []
+
+    # Fixed pair IDs from pairs_dir.
+    for sample_id in config.checkpoint_eval_ids:
+        pair_dir = _resolve_pair_id_dir(config.pairs_dir, sample_id)
+        if pair_dir is None:
+            logger.warning("Checkpoint eval pair ID not found: %s", sample_id)
+            continue
+        zl_path = pair_dir / "zL.pt"
+        if not zl_path.exists():
+            logger.warning("Checkpoint eval pair missing zL.pt: %s", pair_dir)
+            continue
+        zL_eval = torch.load(zl_path, map_location="cpu", weights_only=True)
+        if zL_eval.ndim == 3:
+            zL_eval = zL_eval.unsqueeze(0)
+        if zL_eval.ndim != 4:
+            logger.warning("Checkpoint eval pair has invalid zL shape: %s", tuple(zL_eval.shape))
+            continue
+        x0_pixels = None
+        x0_path = pair_dir / "x0.png"
+        if x0_path.exists():
+            x0_pixels = _load_png_tensor(x0_path).to(device=device, dtype=dtype)
+        samples.append((f"pair_{pair_dir.name}", zL_eval.to(device=device, dtype=dtype), x0_pixels))
+
+    # Arbitrary image folder eval.
+    if config.checkpoint_eval_images_dir is not None:
+        from zimagesr.data.offline_pairs import vae_encode_latents_safe
+
+        image_dir = Path(config.checkpoint_eval_images_dir)
+        if not image_dir.is_dir():
+            logger.warning("Checkpoint eval image folder not found: %s", image_dir)
+        else:
+            image_paths = sorted(
+                p for p in image_dir.iterdir()
+                if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
+            )
+            limit = max(0, int(config.checkpoint_eval_images_limit))
+            if limit:
+                image_paths = image_paths[:limit]
+            for img_path in image_paths:
+                pil_img = _prepare_eval_input_image(
+                    img_path,
+                    upscale=config.checkpoint_eval_input_upscale,
+                    fit_multiple=config.checkpoint_eval_fit_multiple,
+                )
+                zL_eval = vae_encode_latents_safe(
+                    pipe,
+                    pil_img,
+                    device=str(device),
+                    dtype=dtype,
+                )
+                samples.append((f"img_{img_path.stem}", zL_eval.to(device=device, dtype=dtype), None))
+
+    # Fallback: current batch sample.
+    if not samples:
+        samples.append(("batch", default_zL[:1], default_x0_pixels))
+
+    return samples
+
+
 def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
     """Run FTD training following FluxSR Eq. 16/17/18/21.
 
@@ -186,13 +438,26 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
     if config.disable_vae_force_upcast:
         pipe.vae.config.force_upcast = False
 
+    # ── Resume detection ──────────────────────────────────────────────
+    resume_mode = _detect_resume_mode(config.resume_from)
+    logger.info("Resume mode: %s", resume_mode)
+
     # ── LoRA ────────────────────────────────────────────────────────────
-    pipe.transformer = apply_lora(
-        pipe.transformer,
-        rank=config.lora_rank,
-        alpha=config.lora_alpha,
-        dropout=config.lora_dropout,
-    )
+    if resume_mode == ResumeMode.WEIGHTS_ONLY:
+        assert config.resume_from is not None
+        pipe.transformer = _load_weights_only_resume_model(
+            pipe.transformer,
+            config.resume_from,
+        )
+        logger.info("Loaded LoRA weights from %s (weights-only resume)", config.resume_from)
+    else:
+        # NONE: fresh random LoRA; FULL: structure created here, weights overwritten by accelerator.load_state
+        pipe.transformer = apply_lora(
+            pipe.transformer,
+            rank=config.lora_rank,
+            alpha=config.lora_alpha,
+            dropout=config.lora_dropout,
+        )
 
     # ── Dataset ─────────────────────────────────────────────────────────
     ds = FTDPairDataset(config.pairs_dir, load_pixels=(config.rec_loss_every > 0))
@@ -228,6 +493,9 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
         wandb_run.summary["t_scale"] = t_scale
         wandb_run.summary["vae_scaling_factor"] = vae_sf
         wandb_run.summary["cap_feats_shape"] = tuple(int(v) for v in cap_feats_2d.shape)
+        if resume_mode != ResumeMode.NONE:
+            wandb_run.summary["resumed_from"] = str(config.resume_from)
+            wandb_run.summary["resume_mode"] = resume_mode
 
     # ── Optimizer ───────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
@@ -266,8 +534,24 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
     if config.seed is not None:
         torch.manual_seed(config.seed)
 
-    # ── Training loop ───────────────────────────────────────────────────
+    # ── Resume: load full state ──────────────────────────────────────────
     global_step = 0
+    if resume_mode == ResumeMode.FULL:
+        assert config.resume_from is not None
+        state_json = _json.loads(
+            (config.resume_from / "training_state.json").read_text(encoding="utf-8")
+        )
+        _validate_full_resume_config(config, state_json)
+        if "global_step" not in state_json:
+            raise ValueError(
+                f"Missing global_step in checkpoint state file: "
+                f"{config.resume_from / 'training_state.json'}"
+            )
+        accelerator.load_state(str(config.resume_from / "accelerator_state"))
+        global_step = int(state_json["global_step"])
+        logger.info("Resumed full training state from step %d", global_step)
+
+    # ── Training loop ───────────────────────────────────────────────────
     pipe.transformer.train()
     pipe.vae.eval()
 
@@ -276,7 +560,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
     save_dir = Path(config.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    pbar = tqdm(total=config.max_steps, desc="FluxSR-FTD", disable=not accelerator.is_local_main_process)
+    pbar = tqdm(total=config.max_steps, initial=global_step, desc="FluxSR-FTD", disable=not accelerator.is_local_main_process)
 
     try:
         while global_step < config.max_steps:
@@ -418,27 +702,41 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                 if config.save_every > 0 and global_step % config.save_every == 0:
                     sp = save_dir / f"lora_step_{global_step}"
                     save_lora(pipe.transformer, sp, accelerator=accelerator)
+                    _save_training_state(sp, accelerator, global_step, config)
                     ok = (sp / "adapter_config.json").exists()
                     logger.info("Step %d saved: %s (%s)", global_step, sp, "OK" if ok else "MISSING adapter_config!")
                     if config.checkpoint_infer_grid and accelerator.is_main_process:
                         try:
-                            x0_pixels = batch.get("x0_pixels")
-                            if x0_pixels is not None:
-                                x0_pixels = x0_pixels[:1].to(device=device, dtype=dtype)
-                            grid_path = _save_checkpoint_inference_grid(
-                                transformer=pipe.transformer,
-                                vae=pipe.vae,
-                                zL=zL[:1],
-                                x0_pixels=x0_pixels,
-                                tl=TL,
-                                t_scale=t_scale,
-                                vae_sf=vae_sf,
-                                cap_feats_2d=cap_feats_2d,
-                                out_path=sp / "inference_grid.png",
+                            x0_default = batch.get("x0_pixels")
+                            if x0_default is not None:
+                                x0_default = x0_default[:1].to(device=device, dtype=dtype)
+                            eval_samples = _gather_checkpoint_eval_samples(
+                                config=config,
+                                pipe=pipe,
+                                device=device,
+                                dtype=dtype,
+                                default_zL=zL,
+                                default_x0_pixels=x0_default,
                             )
-                            logger.info("Saved checkpoint inference grid: %s", grid_path)
-                            if wandb_run is not None and wandb is not None and config.wandb_log_checkpoint_grids:
-                                wandb_run.log({"train/checkpoint_grid": wandb.Image(str(grid_path))}, step=global_step)
+                            wandb_payload: dict[str, Any] = {}
+                            for sample_name, sample_zL, sample_x0 in eval_samples:
+                                safe_name = _sanitize_eval_name(sample_name)
+                                grid_path = _save_checkpoint_inference_grid(
+                                    transformer=pipe.transformer,
+                                    vae=pipe.vae,
+                                    zL=sample_zL[:1],
+                                    x0_pixels=sample_x0,
+                                    tl=TL,
+                                    t_scale=t_scale,
+                                    vae_sf=vae_sf,
+                                    cap_feats_2d=cap_feats_2d,
+                                    out_path=sp / f"inference_grid_{safe_name}.png",
+                                )
+                                logger.info("Saved checkpoint inference grid [%s]: %s", safe_name, grid_path)
+                                if wandb_run is not None and wandb is not None and config.wandb_log_checkpoint_grids:
+                                    wandb_payload[f"train/checkpoint_grid/{safe_name}"] = wandb.Image(str(grid_path))
+                            if wandb_payload and wandb_run is not None:
+                                wandb_run.log(wandb_payload, step=global_step)
                         except Exception:
                             logger.exception("Failed to save checkpoint inference grid at step %d", global_step)
                     if wandb_run is not None and wandb is not None and config.wandb_log_checkpoints and ok:
@@ -453,6 +751,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
         # ── Final save ──────────────────────────────────────────────────────
         final = save_dir / "lora_final"
         save_lora(pipe.transformer, final, accelerator=accelerator)
+        _save_training_state(final, accelerator, global_step, config)
         logger.info("Final LoRA saved: %s", final)
 
         if wandb_run is not None and wandb is not None and config.wandb_log_checkpoints:
@@ -469,6 +768,8 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
             "final_path": str(final),
             "steps": global_step,
             "wandb_enabled": bool(wandb_run is not None),
+            "resumed_from": str(config.resume_from) if config.resume_from else None,
+            "resume_mode": resume_mode,
         }
     finally:
         pbar.close()

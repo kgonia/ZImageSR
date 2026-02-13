@@ -7,7 +7,16 @@ import torch.nn.functional as F
 
 from zimagesr.training.config import TrainConfig
 from zimagesr.training.losses import compute_adl_loss
-from zimagesr.training.train import _resolve_dtype, _wandb_config_dict
+from zimagesr.training.train import (
+    ResumeMode,
+    _count_trainable_params,
+    _detect_resume_mode,
+    _load_weights_only_resume_model,
+    _resolve_dtype,
+    _save_training_state,
+    _validate_full_resume_config,
+    _wandb_config_dict,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +100,11 @@ class TestTrainConfig:
         assert cfg.wandb_project == "zimagesr"
         assert cfg.wandb_log_checkpoint_grids is True
         assert cfg.checkpoint_infer_grid is False
+        assert cfg.checkpoint_eval_ids == ()
+        assert cfg.checkpoint_eval_images_dir is None
+        assert cfg.checkpoint_eval_images_limit == 4
+        assert cfg.checkpoint_eval_input_upscale == 4.0
+        assert cfg.checkpoint_eval_fit_multiple == 16
 
     def test_custom_values(self, tmp_path):
         cfg = TrainConfig(
@@ -184,3 +198,183 @@ class TestWandbConfigDict:
         data = _wandb_config_dict(cfg)
         assert isinstance(data["pairs_dir"], str)
         assert isinstance(data["save_dir"], str)
+
+
+# ---------------------------------------------------------------------------
+# _detect_resume_mode
+# ---------------------------------------------------------------------------
+
+
+class TestDetectResumeMode:
+    def test_none_returns_none_mode(self):
+        assert _detect_resume_mode(None) == ResumeMode.NONE
+
+    def test_full_checkpoint(self, tmp_path):
+        (tmp_path / "adapter_config.json").write_text("{}")
+        (tmp_path / "adapter_model.safetensors").write_bytes(b"")
+        (tmp_path / "training_state.json").write_text('{"global_step": 100}')
+        (tmp_path / "accelerator_state").mkdir()
+        assert _detect_resume_mode(tmp_path) == ResumeMode.FULL
+
+    def test_weights_only_checkpoint(self, tmp_path):
+        (tmp_path / "adapter_config.json").write_text("{}")
+        (tmp_path / "adapter_model.safetensors").write_bytes(b"")
+        assert _detect_resume_mode(tmp_path) == ResumeMode.WEIGHTS_ONLY
+
+    def test_empty_dir_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="contains neither"):
+            _detect_resume_mode(tmp_path)
+
+    def test_nonexistent_dir_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="not found"):
+            _detect_resume_mode(tmp_path / "does_not_exist")
+
+
+# ---------------------------------------------------------------------------
+# Resume config compatibility validation
+# ---------------------------------------------------------------------------
+
+
+class TestValidateFullResumeConfig:
+    def test_matching_resume_config_is_accepted(self, tmp_path):
+        cfg = TrainConfig(pairs_dir=tmp_path / "pairs")
+        state_json = {"global_step": 123, "config": _wandb_config_dict(cfg)}
+        _validate_full_resume_config(cfg, state_json)
+
+    def test_lora_mismatch_raises_clear_error(self, tmp_path):
+        cfg = TrainConfig(pairs_dir=tmp_path / "pairs", lora_rank=16)
+        saved_cfg = _wandb_config_dict(cfg)
+        saved_cfg["lora_rank"] = 8
+        state_json = {"global_step": 123, "config": saved_cfg}
+        with pytest.raises(ValueError, match="lora_rank"):
+            _validate_full_resume_config(cfg, state_json)
+
+
+# ---------------------------------------------------------------------------
+# Weights-only resume trainability
+# ---------------------------------------------------------------------------
+
+
+class TestWeightsOnlyResumeModel:
+    def test_weights_only_resume_loads_trainable_lora(self, tmp_path):
+        pytest.importorskip("peft")
+        from zimagesr.training.lora import apply_lora, save_lora
+
+        base = torch.nn.Sequential(
+            torch.nn.Linear(8, 8),
+            torch.nn.ReLU(),
+            torch.nn.Linear(8, 8),
+        )
+        lora_model = apply_lora(
+            base,
+            rank=4,
+            alpha=4,
+            targets=["0", "2"],
+        )
+        save_lora(lora_model, tmp_path)
+
+        resumed = _load_weights_only_resume_model(
+            torch.nn.Sequential(
+                torch.nn.Linear(8, 8),
+                torch.nn.ReLU(),
+                torch.nn.Linear(8, 8),
+            ),
+            tmp_path,
+        )
+        assert _count_trainable_params(resumed) > 0
+        assert any("lora_" in name and p.requires_grad for name, p in resumed.named_parameters())
+
+
+# ---------------------------------------------------------------------------
+# _save_training_state
+# ---------------------------------------------------------------------------
+
+
+class TestSaveTrainingState:
+    def _make_accelerator_stub(self, *, is_main: bool = True):
+        """Create a minimal accelerator mock."""
+
+        class AccStub:
+            is_main_process = is_main
+
+            def save_state(self, output_dir):
+                from pathlib import Path
+
+                Path(output_dir).mkdir(parents=True, exist_ok=True)
+                (Path(output_dir) / "pytorch_model.bin").write_bytes(b"fake")
+
+        return AccStub()
+
+    def test_creates_json_and_accelerator_dir(self, tmp_path):
+        import json
+
+        acc = self._make_accelerator_stub()
+        cfg = TrainConfig(pairs_dir=tmp_path / "pairs")
+        ckpt = tmp_path / "ckpt"
+        ckpt.mkdir()
+
+        _save_training_state(ckpt, acc, global_step=42, config=cfg)
+
+        assert (ckpt / "accelerator_state").is_dir()
+        assert (ckpt / "training_state.json").is_file()
+        state = json.loads((ckpt / "training_state.json").read_text())
+        assert state["global_step"] == 42
+        assert "config" in state
+
+    def test_non_main_process_skips_json(self, tmp_path):
+        acc = self._make_accelerator_stub(is_main=False)
+        cfg = TrainConfig(pairs_dir=tmp_path / "pairs")
+        ckpt = tmp_path / "ckpt"
+        ckpt.mkdir()
+
+        _save_training_state(ckpt, acc, global_step=10, config=cfg)
+
+        assert (ckpt / "accelerator_state").is_dir()
+        assert not (ckpt / "training_state.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Resume round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestResumeRoundTrip:
+    def test_save_then_detect_full(self, tmp_path):
+        """Save state, then detect → should be FULL."""
+        import json
+
+        class AccStub:
+            is_main_process = True
+
+            def save_state(self, output_dir):
+                from pathlib import Path
+
+                Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        cfg = TrainConfig(pairs_dir=tmp_path / "pairs")
+        ckpt = tmp_path / "ckpt"
+        ckpt.mkdir()
+
+        _save_training_state(ckpt, AccStub(), global_step=300, config=cfg)
+
+        assert _detect_resume_mode(ckpt) == ResumeMode.FULL
+
+    def test_json_round_trips_step_counter(self, tmp_path):
+        import json
+
+        class AccStub:
+            is_main_process = True
+
+            def save_state(self, output_dir):
+                from pathlib import Path
+
+                Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        cfg = TrainConfig(pairs_dir=tmp_path / "pairs")
+        ckpt = tmp_path / "ckpt"
+        ckpt.mkdir()
+
+        _save_training_state(ckpt, AccStub(), global_step=512, config=cfg)
+
+        state = json.loads((ckpt / "training_state.json").read_text())
+        assert state["global_step"] == 512

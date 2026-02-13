@@ -62,3 +62,11 @@ class TrainConfig:
 
     # Checkpoint-time inference preview
     checkpoint_infer_grid: bool = False
+    checkpoint_eval_ids: tuple[str, ...] = ()
+    checkpoint_eval_images_dir: Path | None = None
+    checkpoint_eval_images_limit: int = 4
+    checkpoint_eval_input_upscale: float = 4.0
+    checkpoint_eval_fit_multiple: int = 16
+
+    # Resume
+    resume_from: Path | None = None
