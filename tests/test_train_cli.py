@@ -24,6 +24,7 @@ class TestAddTrainArgs:
         assert args.lora_rank == TrainConfig.lora_rank
         assert args.lambda_adl == TrainConfig.lambda_adl
         assert args.save_dir.name.startswith("ftd_run_")
+        assert args.save_full_state == TrainConfig.save_full_state
         assert args.wandb == TrainConfig.wandb_enabled
         assert args.wandb_project == TrainConfig.wandb_project
         assert args.wandb_mode == TrainConfig.wandb_mode
@@ -60,6 +61,7 @@ class TestAddTrainArgs:
                 "--lora-dropout", "0.1",
                 "--save-dir", str(tmp_path / "saves"),
                 "--save-every", "50",
+                "--no-save-full-state",
                 "--log-every", "10",
                 "--device", "cpu",
                 "--dtype", "float32",
@@ -98,6 +100,7 @@ class TestAddTrainArgs:
         assert args.lora_rank == 8
         assert args.lora_alpha == 8
         assert args.lora_dropout == 0.1
+        assert args.save_full_state is False
         assert args.mixed_precision == "bf16"
         assert args.gradient_checkpointing is False
         assert args.disable_vae_force_upcast is False
@@ -150,6 +153,7 @@ class TestTrainConfigFromArgs:
         assert cfg.tl == 0.3
         assert cfg.seed == 7
         assert cfg.batch_size == TrainConfig.batch_size  # default
+        assert cfg.save_full_state == TrainConfig.save_full_state
         assert cfg.wandb_enabled is TrainConfig.wandb_enabled
         assert cfg.wandb_log_checkpoint_grids is TrainConfig.wandb_log_checkpoint_grids
         assert cfg.checkpoint_infer_grid is TrainConfig.checkpoint_infer_grid

@@ -702,7 +702,8 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                 if config.save_every > 0 and global_step % config.save_every == 0:
                     sp = save_dir / f"lora_step_{global_step}"
                     save_lora(pipe.transformer, sp, accelerator=accelerator)
-                    _save_training_state(sp, accelerator, global_step, config)
+                    if config.save_full_state:
+                        _save_training_state(sp, accelerator, global_step, config)
                     ok = (sp / "adapter_config.json").exists()
                     logger.info("Step %d saved: %s (%s)", global_step, sp, "OK" if ok else "MISSING adapter_config!")
                     if config.checkpoint_infer_grid and accelerator.is_main_process:
@@ -751,7 +752,8 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
         # ── Final save ──────────────────────────────────────────────────────
         final = save_dir / "lora_final"
         save_lora(pipe.transformer, final, accelerator=accelerator)
-        _save_training_state(final, accelerator, global_step, config)
+        if config.save_full_state:
+            _save_training_state(final, accelerator, global_step, config)
         logger.info("Final LoRA saved: %s", final)
 
         if wandb_run is not None and wandb is not None and config.wandb_log_checkpoints:

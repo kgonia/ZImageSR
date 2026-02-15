@@ -51,6 +51,7 @@ def _train_defaults() -> dict[str, object]:
             "lora_dropout": defaults_cfg.lora_dropout,
             "save_dir": defaults_cfg.save_dir,
             "save_every": defaults_cfg.save_every,
+            "save_full_state": defaults_cfg.save_full_state,
             "log_every": defaults_cfg.log_every,
             "mixed_precision": defaults_cfg.mixed_precision,
             "gradient_checkpointing": defaults_cfg.gradient_checkpointing,
@@ -90,6 +91,7 @@ def _train_defaults() -> dict[str, object]:
         "lora_dropout": 0.0,
         "save_dir": Path(f"./zimage_sr_lora_runs/ftd_run_{ts}"),
         "save_every": 150,
+        "save_full_state": True,
         "log_every": 20,
         "mixed_precision": "no",
         "gradient_checkpointing": True,
@@ -199,6 +201,12 @@ def _add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lora-dropout", type=float, default=defaults["lora_dropout"])
     parser.add_argument("--save-dir", type=Path, default=defaults["save_dir"])
     parser.add_argument("--save-every", type=int, default=defaults["save_every"])
+    parser.add_argument(
+        "--save-full-state",
+        action=argparse.BooleanOptionalAction,
+        default=defaults["save_full_state"],
+        help="Save full optimizer/scheduler state for resume (large files). Default: on.",
+    )
     parser.add_argument("--log-every", type=int, default=defaults["log_every"])
     parser.add_argument("--device", default=None)
     parser.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
@@ -311,6 +319,7 @@ def _train_config_from_args(args: argparse.Namespace):
         lora_dropout=args.lora_dropout,
         save_dir=args.save_dir,
         save_every=args.save_every,
+        save_full_state=args.save_full_state,
         log_every=args.log_every,
         device=args.device,
         dtype=args.dtype,

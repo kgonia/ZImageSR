@@ -41,6 +41,7 @@ class TrainConfig:
     save_dir: Path = field(default_factory=_default_save_dir)
     save_every: int = 150
     log_every: int = 20
+    save_full_state: bool = True  # save optimizer/scheduler for resume (large)
 
     # Device
     device: str | None = None
