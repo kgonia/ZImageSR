@@ -577,6 +577,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Save a comparison grid: LR | Base SR | LoRA SR (+ HR if pair has x0.png).",
     )
 
+    decode_check = sub.add_parser(
+        "decode-check",
+        help="Decode z0.pt latents via VAE and save alongside x0.png for round-trip quality check.",
+    )
+    decode_check.add_argument("--pairs-dir", type=Path, required=True, help="Path to pairs/ directory.")
+    decode_check.add_argument("--model-id", default=_train_defaults()["model_id"])
+    decode_check.add_argument(
+        "--ids",
+        default=None,
+        help="Comma-separated sample IDs to check (e.g. 000000,000010). Defaults to first --limit samples.",
+    )
+    decode_check.add_argument("--limit", type=int, default=5, help="Number of samples when --ids not given.")
+    decode_check.add_argument("--device", default=None)
+    decode_check.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
+
     zenml_run = sub.add_parser(
         "zenml-run",
         help="Run minimal ZenML wrapper pipelines for gather/download.",
@@ -687,6 +702,70 @@ def main() -> None:
         pairs_dir = args.out_dir / "pairs"
         count = generate_zl_latents(pairs_dir, pipe, device, dtype, skip_existing=args.skip_existing)
         print(f"Created {count} zL.pt files")
+        return
+
+    if args.command == "decode-check":
+        import torch
+        from diffusers import ZImageImg2ImgPipeline
+        from zimagesr.training.transformer_utils import vae_decode_to_pixels
+        import torchvision.transforms.functional as TF
+
+        device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        dtype_map = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+        dtype = dtype_map[args.dtype] if args.dtype else (torch.float32 if device == "cpu" else torch.bfloat16)
+
+        pipe = ZImageImg2ImgPipeline.from_pretrained(args.model_id, torch_dtype=dtype).to(device)
+        vae_sf = float(getattr(pipe.vae.config, "scaling_factor", 1.0))
+
+        pairs_dir = args.pairs_dir
+        if args.ids:
+            sample_ids = [v.strip() for v in args.ids.split(",") if v.strip()]
+        else:
+            sample_dirs = sorted(
+                d for d in pairs_dir.iterdir()
+                if d.is_dir() and (d / "z0.pt").exists()
+            )
+            sample_ids = [d.name for d in sample_dirs[: args.limit]]
+
+        if not sample_ids:
+            print("No samples with z0.pt found.")
+            return
+
+        for sid in sample_ids:
+            sample_dir = pairs_dir / sid
+            z0_path = sample_dir / "z0.pt"
+            x0_path = sample_dir / "x0.png"
+            if not z0_path.exists():
+                print(f"  {sid}: z0.pt missing, skipping")
+                continue
+
+            z0 = torch.load(z0_path, map_location="cpu", weights_only=True)
+            if z0.ndim == 3:
+                z0 = z0.unsqueeze(0)
+            z0 = z0.to(device=device, dtype=dtype)
+
+            with torch.no_grad():
+                autocast_dt = torch.bfloat16 if torch.device(device).type == "cuda" else None
+                pixels = vae_decode_to_pixels(pipe.vae, z0, vae_sf, autocast_dtype=autocast_dt)
+                decoded_pil = TF.to_pil_image(pixels[0].clamp(0, 1).float().cpu())
+
+            decoded_path = sample_dir / "z0_decoded.png"
+            decoded_pil.save(decoded_path)
+
+            if x0_path.exists():
+                from PIL import Image
+                x0_pil = Image.open(x0_path).convert("RGB")
+                grid = _build_comparison_grid(
+                    [x0_pil, decoded_pil],
+                    ["x0.png (original)", "z0 decoded (VAE round-trip)"],
+                )
+                grid_path = sample_dir / "z0_roundtrip_grid.png"
+                grid.save(grid_path)
+                print(f"  {sid}: {grid_path}")
+            else:
+                print(f"  {sid}: {decoded_path} (no x0.png for comparison)")
+
+        print(f"\nDecoded {len(sample_ids)} samples. Compare x0.png vs z0_decoded.png for VAE quality ceiling.")
         return
 
     if args.command == "infer":
