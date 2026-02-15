@@ -41,7 +41,7 @@ class TrainConfig:
     save_dir: Path = field(default_factory=_default_save_dir)
     save_every: int = 150
     log_every: int = 20
-    save_full_state: bool = True  # save optimizer/scheduler for resume (large)
+    save_full_state: bool = False  # save optimizer/scheduler for resume (large)
 
     # Device
     device: str | None = None
@@ -68,6 +68,7 @@ class TrainConfig:
     checkpoint_eval_images_limit: int = 4
     checkpoint_eval_input_upscale: float = 4.0
     checkpoint_eval_fit_multiple: int = 16
+    checkpoint_sr_scales: tuple[float, ...] = (1.3, 1.6)  # extra sr_scale sweep columns in grid
 
     # Resume
     resume_from: Path | None = None

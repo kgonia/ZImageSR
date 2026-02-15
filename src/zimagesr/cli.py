@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import math
 from pathlib import Path
 import json
 
@@ -71,6 +72,7 @@ def _train_defaults() -> dict[str, object]:
             "checkpoint_eval_images_limit": defaults_cfg.checkpoint_eval_images_limit,
             "checkpoint_eval_input_upscale": defaults_cfg.checkpoint_eval_input_upscale,
             "checkpoint_eval_fit_multiple": defaults_cfg.checkpoint_eval_fit_multiple,
+            "checkpoint_sr_scales": defaults_cfg.checkpoint_sr_scales,
             "resume_from": defaults_cfg.resume_from,
         }
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -91,7 +93,7 @@ def _train_defaults() -> dict[str, object]:
         "lora_dropout": 0.0,
         "save_dir": Path(f"./zimage_sr_lora_runs/ftd_run_{ts}"),
         "save_every": 150,
-        "save_full_state": True,
+        "save_full_state": False,
         "log_every": 20,
         "mixed_precision": "no",
         "gradient_checkpointing": True,
@@ -111,6 +113,7 @@ def _train_defaults() -> dict[str, object]:
         "checkpoint_eval_images_limit": 4,
         "checkpoint_eval_input_upscale": 4.0,
         "checkpoint_eval_fit_multiple": 16,
+        "checkpoint_sr_scales": (1.3, 1.6),
         "resume_from": None,
     }
 
@@ -285,6 +288,12 @@ def _add_train_args(parser: argparse.ArgumentParser) -> None:
         help="Resize checkpoint eval images to dimensions divisible by this value before VAE encode.",
     )
     parser.add_argument(
+        "--checkpoint-sr-scales",
+        type=_parse_csv_floats,
+        default=defaults["checkpoint_sr_scales"],
+        help="Comma-separated extra sr_scale values for checkpoint grids (e.g. 1.3,1.6).",
+    )
+    parser.add_argument(
         "--resume-from",
         type=Path,
         default=defaults["resume_from"],
@@ -296,6 +305,28 @@ def _parse_csv_values(value: str | None) -> tuple[str, ...]:
     if value is None:
         return ()
     return tuple(v.strip() for v in value.split(",") if v.strip())
+
+
+def _parse_csv_floats(value: str | None) -> tuple[float, ...]:
+    if value is None:
+        return ()
+    out: list[float] = []
+    for raw in value.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        try:
+            scale = float(token)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid --checkpoint-sr-scales value: {token!r} is not a float."
+            ) from exc
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise argparse.ArgumentTypeError(
+                f"Invalid --checkpoint-sr-scales value: {token!r} must be a finite number > 0."
+            )
+        out.append(scale)
+    return tuple(out)
 
 
 def _train_config_from_args(args: argparse.Namespace):
@@ -341,6 +372,7 @@ def _train_config_from_args(args: argparse.Namespace):
         checkpoint_eval_images_limit=args.checkpoint_eval_images_limit,
         checkpoint_eval_input_upscale=args.checkpoint_eval_input_upscale,
         checkpoint_eval_fit_multiple=args.checkpoint_eval_fit_multiple,
+        checkpoint_sr_scales=args.checkpoint_sr_scales,
         resume_from=args.resume_from,
     )
 

@@ -80,7 +80,29 @@ Main debug artifacts:
 - `zimage_offline_pairs/pairs/<sample_id>/z0.pt`
 - `zimage_offline_pairs/pairs/<sample_id>/x0.png`
 
-## 4. S3 Sync for Phase 2
+## 4. VAE Round-Trip Quality Check
+
+Before training, verify that VAE encode/decode preserves image quality.
+If decoding `z0.pt` already looks soft compared to `x0.png`, that softness
+is your quality ceiling — no amount of LoRA training will produce crisper results.
+
+```bash
+# Check first 10 samples
+uv run zimagesr-data decode-check \
+  --pairs-dir ./zimage_offline_pairs/pairs \
+  --limit 10
+
+# Check specific samples
+uv run zimagesr-data decode-check \
+  --pairs-dir ./zimage_offline_pairs/pairs \
+  --ids 000000,000010,000020
+```
+
+Each sample gets:
+- `z0_decoded.png` — VAE decode of the z0 latent
+- `z0_roundtrip_grid.png` — side-by-side comparison: `x0.png (original)` vs `z0 decoded (VAE round-trip)`
+
+## 5. S3 Sync
 
 Upload:
 
@@ -98,7 +120,7 @@ zimagesr-data s3-download \
   --s3-uri s3://YOUR_BUCKET/zimagesr/run-001
 ```
 
-## 5. FTD Training (Phase 2)
+## 6. FTD Training
 
 FTD (Flow Trajectory Distillation) trains a LoRA adapter on the Z-Image transformer
 so it can predict clean latents from degraded ones in a single forward pass.
@@ -147,6 +169,7 @@ Key options:
 | `--wandb-project` | zimagesr | WandB project name |
 | `--wandb-mode` | online | `online` or `offline` |
 | `--wandb-log-checkpoints` | on | Log saved LoRA checkpoints as model artifacts |
+| `--save-full-state` / `--no-save-full-state` | off | Save optimizer/scheduler state for resume (large files) |
 | `--checkpoint-infer-grid` / `--no-checkpoint-infer-grid` | off | Save checkpoint-time one-step inference grid (`inference_grid.png`) |
 | `--wandb-log-checkpoint-grids` / `--no-wandb-log-checkpoint-grids` | on | Log checkpoint inference grids as WandB images |
 | `--checkpoint-eval-ids` | empty | Fixed pair IDs used for checkpoint grids (instead of random batch sample) |
@@ -154,6 +177,7 @@ Key options:
 | `--checkpoint-eval-images-limit` | 4 | Max number of images loaded from `--checkpoint-eval-images-dir` |
 | `--checkpoint-eval-input-upscale` | 4.0 | Bicubic upscale factor before VAE encode for eval images |
 | `--checkpoint-eval-fit-multiple` | 16 | Resize eval images to a multiple before VAE encode |
+| `--checkpoint-sr-scales` | 1.3,1.6 | Extra sr_scale values rendered in checkpoint grids (empty to disable) |
 | `--resume-from` | none | Resume from a checkpoint directory (auto-detects mode) |
 
 Enable WandB example:
@@ -175,9 +199,15 @@ zimagesr-data train \
   --checkpoint-infer-grid \
   --checkpoint-eval-ids 000000,000123,000777 \
   --checkpoint-eval-images-dir ./eval_images \
+  --checkpoint-sr-scales 1.3,1.6 \
   --wandb \
   --wandb-log-checkpoint-grids
 ```
+
+Each checkpoint grid renders: `LR | Base SR | LoRA SR (1.0) | LoRA SR (1.3) | LoRA SR (1.6) | HR`.
+The default `--checkpoint-sr-scales 1.3,1.6` lets you distinguish "model needs more training"
+from "sr_scale needs tuning" without separate inference runs. Pass `--checkpoint-sr-scales ""`
+to render only the default scale.
 
 `--checkpoint-infer-grid` runs extra forward/decoder passes at each checkpoint step, so it adds runtime and some transient VRAM usage. Keep it off for max throughput.
 
@@ -224,10 +254,12 @@ lora_step_300/
     adapter_config.json          # LoRA config (PEFT)
     adapter_model.safetensors    # LoRA weights
     inference_grid_*.png         # (optional) checkpoint inference previews (one per eval sample)
-    training_state.json          # step counter + serialized config
-    accelerator_state/           # optimizer state, RNG, scheduler
+    training_state.json          # (--save-full-state) step counter + serialized config
+    accelerator_state/           # (--save-full-state) optimizer state, RNG, scheduler
 ```
 
+By default only LoRA weights are saved (lightweight). Pass `--save-full-state`
+to also save optimizer/scheduler state for seamless resume.
 LoRA checkpoints are saved as PEFT adapters and remain directly usable for inference
 even without the training state files.
 
@@ -244,7 +276,7 @@ pairs/000000/
   lr_up.png     # (optional) upscaled LR image for zL generation
 ```
 
-## 6. One-step SR Inference
+## 7. One-step SR Inference
 
 After training, run single-step super-resolution from Python:
 
@@ -319,7 +351,7 @@ Notes for `infer`:
 - `--sr-scale` controls correction strength at inference (`z0_hat = zL - sr_scale * v(TL) * TL`).
 - Add `--compare-grid` to save `<output>_grid.png` with `LR (decoded) | Base SR | LoRA SR` and optional `HR (ground truth)` if `x0.png` exists in `--pair-dir`.
 
-## 7. ZenML Minimal Pipelines
+## 8. ZenML Minimal Pipelines
 
 Run gather pipeline:
 
@@ -345,7 +377,7 @@ zimagesr-data zenml-run \
   --out-dir ./zimage_offline_pairs
 ```
 
-## 8. ZenML Stack Bootstrap
+## 9. ZenML Stack Bootstrap
 
 The repository ships with `zenml.yaml`, used by the dedicated bootstrap helper.
 
