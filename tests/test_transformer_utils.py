@@ -158,7 +158,7 @@ class TestCallTransformer:
         tr = FakeZImageTransformer()
         B, C, H, W = 2, 16, 8, 8
         latents = torch.randn(B, C, H, W)
-        ts = torch.tensor([500.0, 500.0])
+        ts = torch.tensor([0.25, 0.75])
         cap = torch.zeros(1, 2560)
 
         out = call_transformer(tr, latents=latents, timestep=ts, cap_feats_2d=cap)
@@ -169,12 +169,13 @@ class TestCallTransformer:
         call = tr.forward_calls[0]
         assert call["all_image_len"] == B
         assert call["shapes"] == [(C, 1, H, W)] * B
+        assert torch.equal(call["t"], ts)
         assert call["return_dict"] is False
 
     def test_single_batch(self):
         tr = FakeZImageTransformer()
         latents = torch.randn(1, 16, 4, 4)
-        ts = torch.tensor([250.0])
+        ts = torch.tensor([0.25])
         cap = torch.zeros(1, 2560)
 
         out = call_transformer(tr, latents=latents, timestep=ts, cap_feats_2d=cap)

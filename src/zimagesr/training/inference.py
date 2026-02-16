@@ -12,7 +12,6 @@ def one_step_sr(
     vae: nn.Module,
     lr_latent: torch.Tensor,
     tl: float,
-    t_scale: float,
     vae_sf: float,
     cap_feats_2d: torch.Tensor,
     sr_scale: float = 1.0,
@@ -24,7 +23,6 @@ def one_step_sr(
         vae: VAE decoder.
         lr_latent: ``(1, C, H, W)`` degraded latent.
         tl: Truncation level TL.
-        t_scale: Transformer's ``t_scale`` config value (usually 1000.0).
         vae_sf: VAE ``scaling_factor``.
         cap_feats_2d: ``(seq_len, cap_dim)`` null caption features.
         sr_scale: Inference correction scale for ``v(TL)``.
@@ -38,7 +36,7 @@ def one_step_sr(
     device = lr_latent.device
     dtype = lr_latent.dtype
 
-    TL_t = torch.tensor([tl * t_scale], device=device, dtype=dtype)
+    TL_t = torch.tensor([tl], device=device, dtype=dtype)
     TL_bc = torch.tensor([tl], device=device, dtype=dtype).view(1, 1, 1, 1)
 
     v = call_transformer(

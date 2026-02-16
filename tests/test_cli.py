@@ -231,7 +231,7 @@ def test_c12_build_parser_accepts_infer_pair_dir():
     assert args.lora_path.as_posix() == "/tmp/lora"
     assert args.pair_dir.as_posix() == "/tmp/pairs/000001"
     assert args.input_image is None
-    assert args.sr_scale == 1.0
+    assert args.sr_scale == (1.0,)
 
 
 def test_c13_build_parser_accepts_infer_input_image():
@@ -258,7 +258,7 @@ def test_c13_build_parser_accepts_infer_input_image():
     assert args.pair_dir is None
     assert args.input_upscale == 1.0
     assert args.fit_multiple == 8
-    assert args.sr_scale == 0.85
+    assert args.sr_scale == (0.85,)
     assert args.output.as_posix() == "/tmp/out.png"
 
 

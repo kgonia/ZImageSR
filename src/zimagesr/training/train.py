@@ -200,7 +200,6 @@ def _save_checkpoint_inference_grid(
     zL: torch.Tensor,
     x0_pixels: torch.Tensor | None,
     tl: float,
-    t_scale: float,
     vae_sf: float,
     cap_feats_2d: torch.Tensor,
     out_path: Path,
@@ -219,7 +218,7 @@ def _save_checkpoint_inference_grid(
 
     _sr_kwargs = dict(
         transformer=transformer, vae=vae, lr_latent=zL,
-        tl=tl, t_scale=t_scale, vae_sf=vae_sf, cap_feats_2d=cap_feats_2d,
+        tl=tl, vae_sf=vae_sf, cap_feats_2d=cap_feats_2d,
     )
 
     was_training = transformer.training
@@ -590,7 +589,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                             v_theta = call_transformer(
                                 pipe.transformer,
                                 latents=x_t,
-                                timestep=t * t_scale,
+                                timestep=t,
                                 cap_feats_2d=cap_feats_2d,
                             )
                         L_ADL = compute_adl_loss(
@@ -603,7 +602,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                         v_theta = call_transformer(
                             pipe.transformer,
                             latents=x_t,
-                            timestep=t * t_scale,
+                            timestep=t,
                             cap_feats_2d=cap_feats_2d,
                         )
                         L_ADL = torch.zeros((), device=device, dtype=dtype)
@@ -624,7 +623,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                     if do_rec:
                         assert tv_lpips is not None
                         x_HR = batch["x0_pixels"].to(device=device, dtype=dtype)
-                        TL_t = torch.full((B,), TL * t_scale, device=device, dtype=dtype)
+                        TL_t = torch.full((B,), TL, device=device, dtype=dtype)
 
                         if config.detach_recon:
                             with torch.no_grad():
@@ -730,7 +729,6 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                                     zL=sample_zL[:1],
                                     x0_pixels=sample_x0,
                                     tl=TL,
-                                    t_scale=t_scale,
                                     vae_sf=vae_sf,
                                     cap_feats_2d=cap_feats_2d,
                                     out_path=sp / f"inference_grid_{safe_name}.png",

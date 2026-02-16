@@ -605,9 +605,9 @@ def build_parser() -> argparse.ArgumentParser:
     infer_cmd.add_argument("--tl", type=float, default=_train_defaults()["tl"])
     infer_cmd.add_argument(
         "--sr-scale",
-        type=float,
-        default=1.0,
-        help="Scale factor for one-step SR correction: z0_hat = zL - sr_scale * v(TL) * TL.",
+        type=_parse_csv_floats,
+        default=(1.0,),
+        help="Comma-separated sr_scale values (e.g. 0.8,1.0,1.3,1.6). Multiple values produce a comparison grid.",
     )
     infer_cmd.add_argument("--device", default=None)
     infer_cmd.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
@@ -866,34 +866,52 @@ def main() -> None:
                 **prep_meta,
             }
 
-        sr_kwargs = dict(
+        sr_scales = args.sr_scale  # tuple of floats
+        sr_common = dict(
             vae=pipe.vae, lr_latent=zL, tl=args.tl,
-            t_scale=t_scale, vae_sf=vae_sf, cap_feats_2d=cap_feats_2d, sr_scale=args.sr_scale,
+            vae_sf=vae_sf, cap_feats_2d=cap_feats_2d,
         )
-        out_img = one_step_sr(transformer=lora_tr, **sr_kwargs)
 
+        # Run inference at each scale
+        sr_results: list[tuple[float, object]] = []
+        for scale in sr_scales:
+            img = one_step_sr(transformer=lora_tr, **sr_common, sr_scale=scale)
+            sr_results.append((scale, img))
+
+        # Save the first scale as the primary output
+        primary_scale, primary_img = sr_results[0]
         out_path = args.output or _infer_default_output(args.pair_dir, args.input_image)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_img.save(out_path)
+        primary_img.save(out_path)
 
-        if args.compare_grid:
+        # Build comparison grid: multi-scale always gets a grid
+        multi_scale = len(sr_scales) > 1
+        if args.compare_grid or multi_scale:
             from zimagesr.training.transformer_utils import vae_decode_to_pixels
             import torchvision.transforms.functional as TF
 
-            # Decode LR input
             autocast_dt = torch.bfloat16 if torch.device(device).type == "cuda" else None
             lr_pixels = vae_decode_to_pixels(pipe.vae, zL, vae_sf, autocast_dtype=autocast_dt)
             lr_pil = TF.to_pil_image(lr_pixels[0].clamp(0, 1).float().cpu())
 
-            # Run base model (disable LoRA adapter)
-            lora_tr.disable_adapter_layers()
-            base_img = one_step_sr(transformer=lora_tr, **sr_kwargs)
-            lora_tr.enable_adapter_layers()
+            grid_imgs = [lr_pil]
+            grid_labels = ["LR (decoded)"]
 
-            grid_imgs = [lr_pil, base_img, out_img]
-            grid_labels = ["LR (decoded)", "Base SR", "LoRA SR"]
+            # Base model (LoRA disabled)
+            if args.compare_grid:
+                lora_tr.disable_adapter_layers()
+                base_img = one_step_sr(transformer=lora_tr, **sr_common, sr_scale=1.0)
+                lora_tr.enable_adapter_layers()
+                grid_imgs.append(base_img)
+                grid_labels.append("Base SR")
 
-            # Include HR ground truth if available from pair dir
+            # All scale results
+            for scale, img in sr_results:
+                grid_imgs.append(img)
+                label = f"LoRA SR ({scale})" if multi_scale else "LoRA SR"
+                grid_labels.append(label)
+
+            # HR ground truth if available
             if args.pair_dir is not None:
                 hr_path = args.pair_dir / "x0.png"
                 if hr_path.exists():
@@ -915,7 +933,7 @@ def main() -> None:
                     "device": device,
                     "dtype": str(dtype),
                     "tl": args.tl,
-                    "sr_scale": args.sr_scale,
+                    "sr_scale": list(sr_scales),
                     "t_scale": t_scale,
                     "vae_sf": vae_sf,
                     **lora_stats,

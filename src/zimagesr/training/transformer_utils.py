@@ -83,7 +83,8 @@ def call_transformer(
     Args:
         transformer: Z-Image transformer (or PeftModel wrapping one).
         latents: ``(B, C, H, W)`` float tensor.
-        timestep: ``(B,)`` float tensor (already multiplied by ``t_scale``).
+        timestep: ``(B,)`` normalized float tensor in ``[0, 1]``.
+            Z-Image internally applies ``self.t_scale``.
         cap_feats_2d: ``(seq_len, cap_dim)`` — single 2-D tensor, replicated per sample.
 
     Returns:
