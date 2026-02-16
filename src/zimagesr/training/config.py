@@ -69,6 +69,7 @@ class TrainConfig:
     checkpoint_eval_input_upscale: float = 4.0
     checkpoint_eval_fit_multiple: int = 16
     checkpoint_sr_scales: tuple[float, ...] = (1.3, 1.6)  # extra sr_scale sweep columns in grid
+    checkpoint_refine_steps: tuple[int, ...] = ()  # extra multi-step refinement columns (e.g. 4,8)
 
     # Resume
     resume_from: Path | None = None

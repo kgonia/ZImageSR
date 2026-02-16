@@ -37,6 +37,7 @@ class TestAddTrainArgs:
         assert args.checkpoint_eval_input_upscale == TrainConfig.checkpoint_eval_input_upscale
         assert args.checkpoint_eval_fit_multiple == TrainConfig.checkpoint_eval_fit_multiple
         assert args.checkpoint_sr_scales == TrainConfig.checkpoint_sr_scales
+        assert args.checkpoint_refine_steps == TrainConfig.checkpoint_refine_steps
         assert args.seed is None
         assert args.resume_from is None
 
@@ -85,6 +86,7 @@ class TestAddTrainArgs:
                 "--checkpoint-eval-input-upscale", "2.0",
                 "--checkpoint-eval-fit-multiple", "8",
                 "--checkpoint-sr-scales", "1.25,1.5",
+                "--checkpoint-refine-steps", "4,8",
             ]
         )
 
@@ -122,6 +124,7 @@ class TestAddTrainArgs:
         assert args.checkpoint_eval_input_upscale == 2.0
         assert args.checkpoint_eval_fit_multiple == 8
         assert args.checkpoint_sr_scales == (1.25, 1.5)
+        assert args.checkpoint_refine_steps == (4, 8)
 
     def test_resume_from_parses_path(self, tmp_path):
         parser = argparse.ArgumentParser()
@@ -144,6 +147,14 @@ class TestAddTrainArgs:
         with pytest.raises(SystemExit):
             parser.parse_args(
                 ["--pairs-dir", str(tmp_path), "--checkpoint-sr-scales", "-1.0,1.3"]
+            )
+
+    def test_checkpoint_refine_steps_rejects_invalid_values(self, tmp_path):
+        parser = argparse.ArgumentParser()
+        cli._add_train_args(parser)
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                ["--pairs-dir", str(tmp_path), "--checkpoint-refine-steps", "0,4"]
             )
 
 
@@ -174,6 +185,7 @@ class TestTrainConfigFromArgs:
         assert cfg.checkpoint_eval_input_upscale == TrainConfig.checkpoint_eval_input_upscale
         assert cfg.checkpoint_eval_fit_multiple == TrainConfig.checkpoint_eval_fit_multiple
         assert cfg.checkpoint_sr_scales == TrainConfig.checkpoint_sr_scales
+        assert cfg.checkpoint_refine_steps == TrainConfig.checkpoint_refine_steps
         assert cfg.resume_from is None
 
     def test_checkpoint_eval_values_round_trip(self, tmp_path):
@@ -189,6 +201,7 @@ class TestTrainConfigFromArgs:
                 "--checkpoint-eval-input-upscale", "1.5",
                 "--checkpoint-eval-fit-multiple", "32",
                 "--checkpoint-sr-scales", "1.1,1.4,2.0",
+                "--checkpoint-refine-steps", "1,4,8",
             ]
         )
         cfg = cli._train_config_from_args(args)
@@ -198,6 +211,7 @@ class TestTrainConfigFromArgs:
         assert cfg.checkpoint_eval_input_upscale == 1.5
         assert cfg.checkpoint_eval_fit_multiple == 32
         assert cfg.checkpoint_sr_scales == (1.1, 1.4, 2.0)
+        assert cfg.checkpoint_refine_steps == (1, 4, 8)
 
     def test_resume_from_round_trip(self, tmp_path):
         parser = argparse.ArgumentParser()

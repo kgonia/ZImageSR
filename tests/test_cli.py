@@ -232,6 +232,7 @@ def test_c12_build_parser_accepts_infer_pair_dir():
     assert args.pair_dir.as_posix() == "/tmp/pairs/000001"
     assert args.input_image is None
     assert args.sr_scale == (1.0,)
+    assert args.refine_steps == (1,)
 
 
 def test_c13_build_parser_accepts_infer_input_image():
@@ -249,6 +250,8 @@ def test_c13_build_parser_accepts_infer_input_image():
             "8",
             "--sr-scale",
             "0.85",
+            "--refine-steps",
+            "4,8",
             "--output",
             "/tmp/out.png",
         ]
@@ -259,6 +262,7 @@ def test_c13_build_parser_accepts_infer_input_image():
     assert args.input_upscale == 1.0
     assert args.fit_multiple == 8
     assert args.sr_scale == (0.85,)
+    assert args.refine_steps == (4, 8)
     assert args.output.as_posix() == "/tmp/out.png"
 
 
@@ -266,6 +270,22 @@ def test_c14_infer_requires_exactly_one_source():
     parser = cli.build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["infer", "--lora-path", "/tmp/lora"])
+
+
+def test_c14b_infer_rejects_invalid_refine_steps():
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "infer",
+                "--lora-path",
+                "/tmp/lora",
+                "--pair-dir",
+                "/tmp/pairs/000001",
+                "--refine-steps",
+                "0,4",
+            ]
+        )
 
 
 def test_c15_prepare_input_image_resizes_to_multiple(tmp_path):

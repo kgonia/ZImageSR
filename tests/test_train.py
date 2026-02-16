@@ -105,6 +105,7 @@ class TestTrainConfig:
         assert cfg.checkpoint_eval_images_limit == 4
         assert cfg.checkpoint_eval_input_upscale == 4.0
         assert cfg.checkpoint_eval_fit_multiple == 16
+        assert cfg.checkpoint_refine_steps == ()
 
     def test_custom_values(self, tmp_path):
         cfg = TrainConfig(

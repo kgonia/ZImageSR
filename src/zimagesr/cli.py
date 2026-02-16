@@ -73,6 +73,7 @@ def _train_defaults() -> dict[str, object]:
             "checkpoint_eval_input_upscale": defaults_cfg.checkpoint_eval_input_upscale,
             "checkpoint_eval_fit_multiple": defaults_cfg.checkpoint_eval_fit_multiple,
             "checkpoint_sr_scales": defaults_cfg.checkpoint_sr_scales,
+            "checkpoint_refine_steps": defaults_cfg.checkpoint_refine_steps,
             "resume_from": defaults_cfg.resume_from,
         }
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -114,6 +115,7 @@ def _train_defaults() -> dict[str, object]:
         "checkpoint_eval_input_upscale": 4.0,
         "checkpoint_eval_fit_multiple": 16,
         "checkpoint_sr_scales": (1.3, 1.6),
+        "checkpoint_refine_steps": (),
         "resume_from": None,
     }
 
@@ -256,7 +258,7 @@ def _add_train_args(parser: argparse.ArgumentParser) -> None:
         "--checkpoint-infer-grid",
         action=argparse.BooleanOptionalAction,
         default=defaults["checkpoint_infer_grid"],
-        help="Run one-step inference preview at checkpoint steps and save comparison grids.",
+        help="Run checkpoint-time inference preview grids (one-step + optional multi-step sweeps).",
     )
     parser.add_argument(
         "--checkpoint-eval-ids",
@@ -294,6 +296,12 @@ def _add_train_args(parser: argparse.ArgumentParser) -> None:
         help="Comma-separated extra sr_scale values for checkpoint grids (e.g. 1.3,1.6).",
     )
     parser.add_argument(
+        "--checkpoint-refine-steps",
+        type=_parse_csv_positive_ints,
+        default=defaults["checkpoint_refine_steps"],
+        help="Comma-separated extra multi-step refinement counts for checkpoint grids (e.g. 4,8).",
+    )
+    parser.add_argument(
         "--resume-from",
         type=Path,
         default=defaults["resume_from"],
@@ -326,6 +334,28 @@ def _parse_csv_floats(value: str | None) -> tuple[float, ...]:
                 f"Invalid --checkpoint-sr-scales value: {token!r} must be a finite number > 0."
             )
         out.append(scale)
+    return tuple(out)
+
+
+def _parse_csv_positive_ints(value: str | None) -> tuple[int, ...]:
+    if value is None:
+        return ()
+    out: list[int] = []
+    for raw in value.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        try:
+            item = int(token)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid integer list value: {token!r} is not an int."
+            ) from exc
+        if item <= 0:
+            raise argparse.ArgumentTypeError(
+                f"Invalid integer list value: {token!r} must be > 0."
+            )
+        out.append(item)
     return tuple(out)
 
 
@@ -373,6 +403,7 @@ def _train_config_from_args(args: argparse.Namespace):
         checkpoint_eval_input_upscale=args.checkpoint_eval_input_upscale,
         checkpoint_eval_fit_multiple=args.checkpoint_eval_fit_multiple,
         checkpoint_sr_scales=args.checkpoint_sr_scales,
+        checkpoint_refine_steps=args.checkpoint_refine_steps,
         resume_from=args.resume_from,
     )
 
@@ -569,7 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     infer_cmd = sub.add_parser(
         "infer",
-        help="Run one-step SR inference from pair zL.pt or arbitrary input image.",
+        help="Run SR inference (one-step or multi-step refinement) from pair zL.pt or arbitrary input image.",
     )
     infer_cmd.add_argument("--model-id", default=_train_defaults()["model_id"])
     infer_cmd.add_argument("--lora-path", type=Path, required=True, help="Path to LoRA adapter directory.")
@@ -608,6 +639,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=_parse_csv_floats,
         default=(1.0,),
         help="Comma-separated sr_scale values (e.g. 0.8,1.0,1.3,1.6). Multiple values produce a comparison grid.",
+    )
+    infer_cmd.add_argument(
+        "--refine-steps",
+        type=_parse_csv_positive_ints,
+        default=(1,),
+        help="Comma-separated refinement step counts from t=TL to 0 (e.g. 1,4,8).",
     )
     infer_cmd.add_argument("--device", default=None)
     infer_cmd.add_argument("--dtype", choices=sorted(DTYPE_MAP.keys()), default=None)
@@ -867,26 +904,34 @@ def main() -> None:
             }
 
         sr_scales = args.sr_scale  # tuple of floats
+        refine_steps = args.refine_steps  # tuple of ints
         sr_common = dict(
             vae=pipe.vae, lr_latent=zL, tl=args.tl,
             vae_sf=vae_sf, cap_feats_2d=cap_feats_2d,
         )
 
-        # Run inference at each scale
-        sr_results: list[tuple[float, object]] = []
-        for scale in sr_scales:
-            img = one_step_sr(transformer=lora_tr, **sr_common, sr_scale=scale)
-            sr_results.append((scale, img))
+        # Run inference for all (scale, steps) combinations.
+        sr_results: list[tuple[float, int, object]] = []
+        for steps in refine_steps:
+            for scale in sr_scales:
+                img = one_step_sr(
+                    transformer=lora_tr,
+                    **sr_common,
+                    sr_scale=scale,
+                    refine_steps=steps,
+                )
+                sr_results.append((scale, steps, img))
 
-        # Save the first scale as the primary output
-        primary_scale, primary_img = sr_results[0]
+        # Save the first configuration as the primary output.
+        primary_scale, primary_steps, primary_img = sr_results[0]
         out_path = args.output or _infer_default_output(args.pair_dir, args.input_image)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         primary_img.save(out_path)
 
-        # Build comparison grid: multi-scale always gets a grid
+        # Build comparison grid when explicitly requested or when sweeping params.
         multi_scale = len(sr_scales) > 1
-        if args.compare_grid or multi_scale:
+        multi_steps = len(refine_steps) > 1
+        if args.compare_grid or multi_scale or multi_steps:
             from zimagesr.training.transformer_utils import vae_decode_to_pixels
             import torchvision.transforms.functional as TF
 
@@ -900,15 +945,30 @@ def main() -> None:
             # Base model (LoRA disabled)
             if args.compare_grid:
                 lora_tr.disable_adapter_layers()
-                base_img = one_step_sr(transformer=lora_tr, **sr_common, sr_scale=1.0)
+                base_img = one_step_sr(
+                    transformer=lora_tr,
+                    **sr_common,
+                    sr_scale=1.0,
+                    refine_steps=refine_steps[0],
+                )
                 lora_tr.enable_adapter_layers()
                 grid_imgs.append(base_img)
-                grid_labels.append("Base SR")
+                if refine_steps[0] == 1:
+                    grid_labels.append("Base SR")
+                else:
+                    grid_labels.append(f"Base SR ({refine_steps[0]}-step)")
 
-            # All scale results
-            for scale, img in sr_results:
+            # All inference results.
+            for scale, steps, img in sr_results:
                 grid_imgs.append(img)
-                label = f"LoRA SR ({scale})" if multi_scale else "LoRA SR"
+                if multi_scale and multi_steps:
+                    label = f"LoRA SR (s={scale}, n={steps})"
+                elif multi_scale:
+                    label = f"LoRA SR ({scale})"
+                elif multi_steps:
+                    label = f"LoRA SR ({steps}-step)"
+                else:
+                    label = "LoRA SR"
                 grid_labels.append(label)
 
             # HR ground truth if available
@@ -934,6 +994,9 @@ def main() -> None:
                     "dtype": str(dtype),
                     "tl": args.tl,
                     "sr_scale": list(sr_scales),
+                    "refine_steps": list(refine_steps),
+                    "primary_sr_scale": primary_scale,
+                    "primary_refine_steps": primary_steps,
                     "t_scale": t_scale,
                     "vae_sf": vae_sf,
                     **lora_stats,

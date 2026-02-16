@@ -204,12 +204,15 @@ def _save_checkpoint_inference_grid(
     cap_feats_2d: torch.Tensor,
     out_path: Path,
     extra_sr_scales: tuple[float, ...] = (),
+    extra_refine_steps: tuple[int, ...] = (),
 ) -> Path:
     """Save an LR|Base SR|LoRA SR( + HR) comparison grid for checkpoint diagnostics.
 
     When *extra_sr_scales* is non-empty, additional LoRA SR columns are
     rendered at each scale (e.g. 1.3, 1.6) so the user can compare
     correction strength without confusing model quality with scale choice.
+    When *extra_refine_steps* is non-empty, additional LoRA SR columns are
+    rendered with multi-step refinement counts (e.g. 4, 8).
     """
     import torchvision.transforms.functional as TF
 
@@ -228,7 +231,7 @@ def _save_checkpoint_inference_grid(
             lr_pixels = vae_decode_to_pixels(vae, zL, vae_sf, autocast_dtype=autocast_dt)
             lr_pil = TF.to_pil_image(lr_pixels[0].clamp(0, 1).float().cpu())
 
-            lora_img = one_step_sr(**_sr_kwargs)
+            lora_img = one_step_sr(**_sr_kwargs, refine_steps=1)
 
             base_img = None
             if hasattr(transformer, "disable_adapter_layers") and hasattr(transformer, "enable_adapter_layers"):
@@ -240,7 +243,13 @@ def _save_checkpoint_inference_grid(
 
             sweep_imgs = []
             for scale in extra_sr_scales:
-                sweep_imgs.append((scale, one_step_sr(**_sr_kwargs, sr_scale=scale)))
+                if abs(scale - 1.0) < 1e-8:
+                    continue
+                sweep_imgs.append((f"LoRA SR ({scale})", one_step_sr(**_sr_kwargs, sr_scale=scale, refine_steps=1)))
+            for steps in extra_refine_steps:
+                if steps == 1:
+                    continue
+                sweep_imgs.append((f"LoRA SR ({steps}-step)", one_step_sr(**_sr_kwargs, refine_steps=steps)))
 
             images = [lr_pil]
             labels = ["LR (decoded)"]
@@ -248,10 +257,10 @@ def _save_checkpoint_inference_grid(
                 images.append(base_img)
                 labels.append("Base SR")
             images.append(lora_img)
-            labels.append("LoRA SR (1.0)")
-            for scale, img in sweep_imgs:
+            labels.append("LoRA SR (1.0, 1-step)")
+            for label, img in sweep_imgs:
                 images.append(img)
-                labels.append(f"LoRA SR ({scale})")
+                labels.append(label)
             if x0_pixels is not None:
                 hr_pil = TF.to_pil_image(x0_pixels[0].clamp(0, 1).float().cpu())
                 images.append(hr_pil)
@@ -733,6 +742,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                                     cap_feats_2d=cap_feats_2d,
                                     out_path=sp / f"inference_grid_{safe_name}.png",
                                     extra_sr_scales=config.checkpoint_sr_scales,
+                                    extra_refine_steps=config.checkpoint_refine_steps,
                                 )
                                 logger.info("Saved checkpoint inference grid [%s]: %s", safe_name, grid_path)
                                 if wandb_run is not None and wandb is not None and config.wandb_log_checkpoint_grids:
