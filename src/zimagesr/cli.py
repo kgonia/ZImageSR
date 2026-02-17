@@ -45,6 +45,7 @@ def _train_defaults() -> dict[str, object]:
             "rec_loss_every": defaults_cfg.rec_loss_every,
             "lambda_tvlpips": defaults_cfg.lambda_tvlpips,
             "gamma_tv": defaults_cfg.gamma_tv,
+            "lambda_z0": defaults_cfg.lambda_z0,
             "detach_recon": defaults_cfg.detach_recon,
             "lambda_adl": defaults_cfg.lambda_adl,
             "lora_rank": defaults_cfg.lora_rank,
@@ -87,6 +88,7 @@ def _train_defaults() -> dict[str, object]:
         "rec_loss_every": 8,
         "lambda_tvlpips": 1.0,
         "gamma_tv": 0.5,
+        "lambda_z0": 0.0,
         "detach_recon": True,
         "lambda_adl": 0.0,
         "lora_rank": 16,
@@ -195,6 +197,7 @@ def _add_train_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rec-loss-every", type=int, default=defaults["rec_loss_every"])
     parser.add_argument("--lambda-tvlpips", type=float, default=defaults["lambda_tvlpips"])
     parser.add_argument("--gamma-tv", type=float, default=defaults["gamma_tv"])
+    parser.add_argument("--lambda-z0", type=float, default=defaults["lambda_z0"])
     parser.add_argument(
         "--detach-recon",
         action=argparse.BooleanOptionalAction,
@@ -373,6 +376,7 @@ def _train_config_from_args(args: argparse.Namespace):
         rec_loss_every=args.rec_loss_every,
         lambda_tvlpips=args.lambda_tvlpips,
         gamma_tv=args.gamma_tv,
+        lambda_z0=args.lambda_z0,
         detach_recon=args.detach_recon,
         lambda_adl=args.lambda_adl,
         lora_rank=args.lora_rank,

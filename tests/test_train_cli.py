@@ -22,6 +22,7 @@ class TestAddTrainArgs:
         assert args.batch_size == TrainConfig.batch_size
         assert args.max_steps == TrainConfig.max_steps
         assert args.lora_rank == TrainConfig.lora_rank
+        assert args.lambda_z0 == TrainConfig.lambda_z0
         assert args.lambda_adl == TrainConfig.lambda_adl
         assert args.save_dir.name.startswith("ftd_run_")
         assert args.save_full_state == TrainConfig.save_full_state
@@ -56,6 +57,7 @@ class TestAddTrainArgs:
                 "--rec-loss-every", "0",
                 "--lambda-tvlpips", "2.0",
                 "--gamma-tv", "0.3",
+                "--lambda-z0", "0.1",
                 "--no-detach-recon",
                 "--lambda-adl", "0.01",
                 "--lora-rank", "8",
@@ -99,6 +101,7 @@ class TestAddTrainArgs:
         assert args.rec_loss_every == 0
         assert args.lambda_tvlpips == 2.0
         assert args.gamma_tv == 0.3
+        assert args.lambda_z0 == 0.1
         assert args.detach_recon is False
         assert args.lambda_adl == 0.01
         assert args.lora_rank == 8
@@ -174,6 +177,7 @@ class TestTrainConfigFromArgs:
         assert cfg.pairs_dir == tmp_path
         assert cfg.tl == 0.3
         assert cfg.seed == 7
+        assert cfg.lambda_z0 == TrainConfig.lambda_z0
         assert cfg.batch_size == TrainConfig.batch_size  # default
         assert cfg.save_full_state == TrainConfig.save_full_state
         assert cfg.wandb_enabled is TrainConfig.wandb_enabled

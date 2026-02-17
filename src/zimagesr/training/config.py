@@ -29,6 +29,7 @@ class TrainConfig:
     rec_loss_every: int = 8  # 0 to disable
     lambda_tvlpips: float = 1.0
     gamma_tv: float = 0.5
+    lambda_z0: float = 0.0  # latent endpoint supervision weight (0 = disabled)
     detach_recon: bool = True  # gradient-free recon (saves VRAM)
     lambda_adl: float = 0.0  # ADL weight (0 = disabled)
 

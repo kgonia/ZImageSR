@@ -566,7 +566,8 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
     pipe.vae.eval()
 
     use_adl = config.lambda_adl > 0
-    loss_log: dict[str, float] = {"ftd": 0.0, "rec": 0.0, "adl": 0.0, "total": 0.0}
+    use_z0 = config.lambda_z0 > 0
+    loss_log: dict[str, float] = {"ftd": 0.0, "z0": 0.0, "rec": 0.0, "adl": 0.0, "total": 0.0}
     save_dir = Path(config.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -621,20 +622,32 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                     ftd_target = eps - zL
                     L_FTD = F.mse_loss(ftd_pred, ftd_target)
 
-                    # ── Recon loss (Eq. 18/21) ──────────────────────────────
+                    # ── Latent endpoint + recon losses (Eq. 18/21) ───────────
+                    L_Z0 = torch.zeros((), device=device, dtype=dtype)
                     L_Rec = torch.tensor(0.0, device=device)
                     do_rec = (
                         config.rec_loss_every > 0
                         and global_step % config.rec_loss_every == 0
                         and "x0_pixels" in batch
                     )
+                    do_z0 = use_z0
+                    do_tl = do_rec or do_z0
 
-                    if do_rec:
-                        assert tv_lpips is not None
-                        x_HR = batch["x0_pixels"].to(device=device, dtype=dtype)
+                    if do_tl:
                         TL_t = torch.full((B,), TL, device=device, dtype=dtype)
+                        need_grad_tl = do_z0 or not config.detach_recon
 
-                        if config.detach_recon:
+                        if need_grad_tl:
+                            v_TL = call_transformer(
+                                pipe.transformer,
+                                latents=zL,
+                                timestep=TL_t,
+                                cap_feats_2d=cap_feats_2d,
+                            )
+                            z0_hat = zL - v_TL * TL_bc
+                            if do_z0:
+                                L_Z0 = F.smooth_l1_loss(z0_hat.float(), z0.float()).to(device=device, dtype=dtype)
+                        else:
                             with torch.no_grad():
                                 v_TL = call_transformer(
                                     pipe.transformer,
@@ -643,32 +656,26 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                                     cap_feats_2d=cap_feats_2d,
                                 )
                                 z0_hat = zL - v_TL * TL_bc
-                                autocast_dt = torch.bfloat16 if device.type != "cpu" else None
-                                x0_hat = vae_decode_to_pixels(pipe.vae, z0_hat, vae_sf, autocast_dtype=autocast_dt)
 
-                                L_MSE = F.mse_loss(x0_hat, x_HR)
-
-                                L_TVLP = tv_lpips(x0_hat.float(), x_HR.float())
-
-                            L_Rec = (L_MSE + config.lambda_tvlpips * L_TVLP).to(device=device, dtype=dtype)
-                        else:
-                            v_TL = call_transformer(
-                                pipe.transformer,
-                                latents=zL,
-                                timestep=TL_t,
-                                cap_feats_2d=cap_feats_2d,
-                            )
-                            z0_hat = zL - v_TL * TL_bc
+                        if do_rec:
+                            assert tv_lpips is not None
+                            x_HR = batch["x0_pixels"].to(device=device, dtype=dtype)
                             autocast_dt = torch.bfloat16 if device.type != "cpu" else None
-                            x0_hat = vae_decode_to_pixels(pipe.vae, z0_hat, vae_sf, autocast_dtype=autocast_dt)
+                            z_for_rec = z0_hat.detach() if config.detach_recon else z0_hat
 
-                            L_MSE = F.mse_loss(x0_hat, x_HR)
+                            if config.detach_recon:
+                                with torch.no_grad():
+                                    x0_hat = vae_decode_to_pixels(pipe.vae, z_for_rec, vae_sf, autocast_dtype=autocast_dt)
+                                    L_MSE = F.mse_loss(x0_hat, x_HR)
+                                    L_TVLP = tv_lpips(x0_hat.float(), x_HR.float())
+                                L_Rec = (L_MSE + config.lambda_tvlpips * L_TVLP).to(device=device, dtype=dtype)
+                            else:
+                                x0_hat = vae_decode_to_pixels(pipe.vae, z_for_rec, vae_sf, autocast_dtype=autocast_dt)
+                                L_MSE = F.mse_loss(x0_hat, x_HR)
+                                L_TVLP = tv_lpips(x0_hat.float(), x_HR.float())
+                                L_Rec = L_MSE + config.lambda_tvlpips * L_TVLP
 
-                            L_TVLP = tv_lpips(x0_hat.float(), x_HR.float())
-
-                            L_Rec = L_MSE + config.lambda_tvlpips * L_TVLP
-
-                    loss = L_FTD + L_Rec + config.lambda_adl * L_ADL
+                    loss = L_FTD + config.lambda_z0 * L_Z0 + L_Rec + config.lambda_adl * L_ADL
 
                     accelerator.backward(loss)
                     optimizer.step()
@@ -677,6 +684,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                 # ── Logging ─────────────────────────────────────────────────
                 global_step += 1
                 loss_log["ftd"] += L_FTD.item()
+                loss_log["z0"] += L_Z0.item()
                 loss_log["rec"] += L_Rec.item()
                 loss_log["adl"] += L_ADL.item()
                 loss_log["total"] += loss.item()
@@ -685,6 +693,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                 if global_step % config.log_every == 0:
                     n = config.log_every
                     avg_ftd = loss_log["ftd"] / n
+                    avg_z0 = loss_log["z0"] / n
                     avg_rec = loss_log["rec"] / n
                     avg_adl = loss_log["adl"] / n
                     avg_total = loss_log["total"] / n
@@ -693,6 +702,8 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                         "rec": f"{avg_rec:.4f}",
                         "tot": f"{avg_total:.4f}",
                     }
+                    if use_z0:
+                        postfix["z0"] = f"{avg_z0:.4f}"
                     if use_adl:
                         postfix["adl"] = f"{avg_adl:.4f}"
                     pbar.set_postfix(postfix)
@@ -700,6 +711,7 @@ def ftd_train_loop(config: TrainConfig) -> dict[str, Any]:
                         wandb_run.log(
                             {
                                 "train/loss_ftd": avg_ftd,
+                                "train/loss_z0": avg_z0,
                                 "train/loss_rec": avg_rec,
                                 "train/loss_adl": avg_adl,
                                 "train/loss_total": avg_total,

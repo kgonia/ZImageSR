@@ -94,6 +94,7 @@ class TestTrainConfig:
         assert cfg.lora_rank == 16
         assert cfg.max_steps == 750
         assert cfg.rec_loss_every == 8
+        assert cfg.lambda_z0 == 0.0
         assert cfg.lambda_adl == 0.0
         assert cfg.save_dir.name.startswith("ftd_run_")
         assert cfg.wandb_enabled is False
