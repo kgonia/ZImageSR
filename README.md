@@ -3,10 +3,26 @@
 FluxSR-style super-resolution pipeline for Z-Image Turbo:
 - **Stage 0** — generate offline `(eps, z0, x0)` pairs and placeholder LR images
 - **FTD Training** — Flow Trajectory Distillation with LoRA on the Z-Image transformer
-- **One-step SR inference** — single forward pass super-resolution from a degraded latent
+- **SR inference** — one-step or multi-step latent refinement from a degraded latent
 - inspect tensor/image/model shapes for debugging
 - upload/download dataset bundles with S3
 - orchestrate runs with minimal ZenML wrappers
+
+## Current Status (Important)
+
+This repository is a research reproduction in progress.
+
+- Current practical result from long Phase 2 runs: outputs are still mostly blurry.
+- Possible causes: undertraining, objective weighting, or implementation mismatch vs paper details.
+- No confirmed paper-quality reproduction yet due limited additional H100 budget.
+- Keep this in mind when planning experiments and expectations.
+
+### Known Limitations / Negative Results
+
+- Multiple Phase 2 runs (from short to long schedules) improved color/structure but did not consistently recover sharp high-frequency detail.
+- Some later checkpoints produced over-textured/noisy outputs instead of clean sharpening.
+- Best qualitative checkpoints were often mid-run; final checkpoints were not reliably best.
+- Current implementation should be treated as an experimental baseline, not a validated FluxSR reproduction.
 
 ## 1. Setup
 
@@ -159,6 +175,7 @@ Key options:
 | `--tl` | 0.25 | Truncation level TL |
 | `--rec-loss-every` | 8 | Pixel recon loss frequency (0 to disable) |
 | `--lambda-tvlpips` | 1.0 | Weight for TV-LPIPS recon loss |
+| `--lambda-z0` | 0.0 | Weight for latent endpoint loss `SmoothL1(z0_hat, z0)` |
 | `--lambda-adl` | 0.0 | ADL regularization weight (set > 0 to enable) |
 | `--detach-recon` / `--no-detach-recon` | on | Gradient-free recon (saves VRAM) |
 | `--gradient-checkpointing` / `--no-gradient-checkpointing` | on | Reduce VRAM at cost of speed |
@@ -170,7 +187,7 @@ Key options:
 | `--wandb-mode` | online | `online` or `offline` |
 | `--wandb-log-checkpoints` | on | Log saved LoRA checkpoints as model artifacts |
 | `--save-full-state` / `--no-save-full-state` | off | Save optimizer/scheduler state for resume (large files) |
-| `--checkpoint-infer-grid` / `--no-checkpoint-infer-grid` | off | Save checkpoint-time one-step inference grid (`inference_grid.png`) |
+| `--checkpoint-infer-grid` / `--no-checkpoint-infer-grid` | off | Save checkpoint-time inference grids (one-step + optional multi-step sweeps) |
 | `--wandb-log-checkpoint-grids` / `--no-wandb-log-checkpoint-grids` | on | Log checkpoint inference grids as WandB images |
 | `--checkpoint-eval-ids` | empty | Fixed pair IDs used for checkpoint grids (instead of random batch sample) |
 | `--checkpoint-eval-images-dir` | none | Folder of arbitrary images to include in checkpoint grids |
@@ -178,6 +195,7 @@ Key options:
 | `--checkpoint-eval-input-upscale` | 4.0 | Bicubic upscale factor before VAE encode for eval images |
 | `--checkpoint-eval-fit-multiple` | 16 | Resize eval images to a multiple before VAE encode |
 | `--checkpoint-sr-scales` | 1.3,1.6 | Extra sr_scale values rendered in checkpoint grids (empty to disable) |
+| `--checkpoint-refine-steps` | empty | Extra multi-step refinement counts rendered in checkpoint grids (e.g. `4,8,16`) |
 | `--resume-from` | none | Resume from a checkpoint directory (auto-detects mode) |
 
 Enable WandB example:
@@ -200,21 +218,25 @@ zimagesr-data train \
   --checkpoint-eval-ids 000000,000123,000777 \
   --checkpoint-eval-images-dir ./eval_images \
   --checkpoint-sr-scales 1.3,1.6 \
+  --checkpoint-refine-steps 4,8 \
   --wandb \
   --wandb-log-checkpoint-grids
 ```
 
-Each checkpoint grid renders: `LR | Base SR | LoRA SR (1.0) | LoRA SR (1.3) | LoRA SR (1.6) | HR`.
-The default `--checkpoint-sr-scales 1.3,1.6` lets you distinguish "model needs more training"
-from "sr_scale needs tuning" without separate inference runs. Pass `--checkpoint-sr-scales ""`
-to render only the default scale.
+Each checkpoint grid renders a baseline plus configured sweeps, e.g.:
+`LR | Base SR | LoRA SR (1.0, 1-step) | LoRA SR (1.3) | LoRA SR (1.6) | LoRA SR (4-step) | LoRA SR (8-step) | HR`.
+`--checkpoint-sr-scales` controls correction-strength sweep and `--checkpoint-refine-steps`
+controls multi-step refinement sweep.
 
 `--checkpoint-infer-grid` runs extra forward/decoder passes at each checkpoint step, so it adds runtime and some transient VRAM usage. Keep it off for max throughput.
 
 ### Resume training
 
-Checkpoints now include full training state (`training_state.json` + `accelerator_state/`)
-alongside the LoRA adapter weights. If a run is interrupted, resume with `--resume-from`:
+If a run is interrupted, resume with `--resume-from`.
+Resume mode is auto-detected from checkpoint contents:
+
+Important: by default checkpoints are lightweight LoRA-only.
+Use `--save-full-state` during training if you need seamless full-state resume.
 
 ```bash
 # Full resume — restores optimizer state, RNG, and step counter
@@ -276,7 +298,7 @@ pairs/000000/
   lr_up.png     # (optional) upscaled LR image for zL generation
 ```
 
-## 7. One-step SR Inference
+## 7. SR Inference (One-step + Multi-step)
 
 After training, run single-step super-resolution from Python:
 
@@ -313,7 +335,7 @@ pil_image = one_step_sr(
     lr_latent=zL,
     tl=0.25,
     sr_scale=1.0,
-    t_scale=1000.0,
+    refine_steps=1,
     vae_sf=0.3611,
     cap_feats_2d=cap_feats,
 )
@@ -327,7 +349,9 @@ zimagesr-data infer \
   --model-id Tongyi-MAI/Z-Image-Turbo \
   --lora-path ./zimage_sr_lora_runs/ftd_run/lora_final \
   --pair-dir ./zimage_offline_pairs/pairs/000000 \
-  --sr-scale 1.0 \
+  --sr-scale 1.0,1.2 \
+  --refine-steps 1,8 \
+  --compare-grid \
   --output ./sr_from_pair.png
 ```
 
@@ -341,6 +365,8 @@ zimagesr-data infer \
   --input-upscale 4.0 \
   --fit-multiple 16 \
   --sr-scale 0.9 \
+  --refine-steps 1,8 \
+  --compare-grid \
   --output ./sr_from_image.png
 ```
 
@@ -349,7 +375,8 @@ Notes for `infer`:
 - In `--input-image` mode, the image is RGB-converted, optionally bicubic-upscaled (`--input-upscale`), then resized to dimensions divisible by `--fit-multiple` before VAE encoding.
 - Set `--input-upscale 1.0` if your input is already in the intended pre-upscaled space.
 - `--sr-scale` controls correction strength at inference (`z0_hat = zL - sr_scale * v(TL) * TL`).
-- Add `--compare-grid` to save `<output>_grid.png` with `LR (decoded) | Base SR | LoRA SR` and optional `HR (ground truth)` if `x0.png` exists in `--pair-dir`.
+- `--refine-steps` controls Euler refinement steps from `t=TL` to `0` (`1` reproduces one-step inference).
+- Add `--compare-grid` to save `<output>_grid.png` with `LR (decoded) | Base SR | LoRA SR ...` and optional `HR (ground truth)` if `x0.png` exists in `--pair-dir`.
 
 ## 8. ZenML Minimal Pipelines
 
@@ -419,3 +446,30 @@ zimagesr-zenml-bootstrap --config zenml.yaml --activate-stack zimagesr-s3-stack
 - `torch`/CUDA installation is environment-specific; install the wheel that matches your CUDA runtime.
 - S3 sync uses `boto3` default credential chain.
 - `peft` and `lpips` are only needed for training and are not required for data generation or S3 sync.
+
+## 10. Citation
+
+If you use this repository, cite both the implementation and the upstream papers.
+
+```bibtex
+@software{zimagesr_2026,
+  title  = {ZImageSR: FluxSR-style Super-Resolution Pipeline for Z-Image Turbo},
+  author = {Krzysztof Gonia},
+  year   = {2026},
+  note   = {Local project repository}
+}
+
+@article{li2025fluxsr,
+  title   = {One Diffusion Step to Real-World Super-Resolution via Flow Trajectory Distillation},
+  author  = {Li, Jianze and Cao, Jiezhang and Guo, Yong and Li, Wenbo and Zhang, Yulun},
+  journal = {arXiv preprint arXiv:2502.01993},
+  year    = {2025}
+}
+
+@article{cai2025zimage,
+  title   = {Z-Image: An Efficient Image Generation Foundation Model with Single-Stream Diffusion Transformer},
+  author  = {Cai, Huanqia and Cao, Sihan and Du, Ruoyi and Gao, Peng and Hoi, Steven and others},
+  journal = {arXiv preprint arXiv:2511.22699},
+  year    = {2025}
+}
+```
